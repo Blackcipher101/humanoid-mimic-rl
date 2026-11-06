@@ -38,6 +38,9 @@ from humanoid_mimic_rl.envs import t1_full_collision as base
 from humanoid_mimic_rl.envs.backflip import phase_features
 
 
+TERMINATIONS = ("root_pose", "height_tilt")
+
+
 def default_config() -> config_dict.ConfigDict:
     return config_dict.create(
         reference_path="",  # .npz written by scripts/make_reference.py; required
@@ -54,6 +57,9 @@ def default_config() -> config_dict.ConfigDict:
         fall_height_m=0.2,
         max_root_pos_err_m=0.6,
         max_root_angle_err_rad=1.2,
+        termination="root_pose",  # "root_pose": 3D root drift / full orientation; "height_tilt": SuperMimic App. A
+        max_root_height_err_m=0.25,  # "height_tilt" only
+        max_tilt_err=0.8,  # "height_tilt" only: |g_z_body - g_z_ref|, in (0, 2]
         gains=config_dict.create(pose=2.0, velocity=0.1, end_effector=40.0, root=10.0),
         noise_config=base.noise_config(),
         reward_config=config_dict.create(
@@ -99,6 +105,13 @@ class MimicTask:
             raise ValueError(f"reference joint order does not match the {type(self).__name__} robot")
         if clip.site_names != self.END_EFFECTOR_SITES:
             raise ValueError(f"reference sites {clip.site_names} != {self.END_EFFECTOR_SITES}")
+        c = self._config
+        if c.termination not in TERMINATIONS:
+            raise ValueError(f"termination must be one of {TERMINATIONS}, got {c.termination!r}")
+        if not c.max_root_height_err_m > 0.0:
+            raise ValueError(f"max_root_height_err_m must be > 0, got {c.max_root_height_err_m}")
+        if not 0.0 < c.max_tilt_err <= 2.0:
+            raise ValueError(f"max_tilt_err must be in (0, 2], got {c.max_tilt_err}")
         self._clip = clip
         self._ref_qpos = jp.array(clip.qpos)
         self._ref_qvel = jp.array(clip.qvel)
@@ -192,9 +205,14 @@ class MimicTask:
         terms["action_rate"] = rewards.action_rate_cost(action, last_act, last_last_act, jp)
         reward, scaled = base.weighted_reward(terms, c.reward_config.scales, self.dt)
         fell = jp.min(fall_geom_heights_m) < c.fall_height_m
-        failed = rewards.tracking_failed(
-            root_pos, ref_q[0:3], root_quat, ref_q[3:7], c.max_root_pos_err_m, c.max_root_angle_err_rad, jp
-        )
+        if c.termination == "height_tilt":
+            failed = rewards.height_tilt_failed(
+                root_pos, ref_q[0:3], root_quat, ref_q[3:7], c.max_root_height_err_m, c.max_tilt_err, jp
+            )
+        else:
+            failed = rewards.tracking_failed(
+                root_pos, ref_q[0:3], root_quat, ref_q[3:7], c.max_root_pos_err_m, c.max_root_angle_err_rad, jp
+            )
         finished = t_s >= self._episode_end_s
         flags = {
             "fell": fell,

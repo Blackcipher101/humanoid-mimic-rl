@@ -123,3 +123,55 @@ def test_tracking_metrics_and_flip_detection():
     flip = ref.copy()
     flip[:, 3:7] = quat.quat_from_axis_angle(Y, np.linspace(0, -2 * np.pi, n_t), np)
     assert metrics.is_flip_clip(flip)
+
+
+def _tracking_inputs(done_at: dict[int, int], n: int = 3, n_t: int = 50):
+    done = np.zeros((n, n_t))
+    for ep, step in done_at.items():
+        done[ep, step] = 1.0
+    qpos = np.zeros((n, n_t, 9))
+    qpos[..., 3] = 1.0
+    return np.ones((n, n_t)), done, qpos
+
+
+def test_tracking_cause_rates_separate_finish_from_failure():
+    # ep0 reaches the clip end (done at the last step, no cause flag), ep1 falls, ep2 loses tracking.
+    reward, done, qpos = _tracking_inputs({0: 49, 1: 20, 2: 30})
+    fell = np.zeros_like(done)
+    failed = np.zeros_like(done)
+    fell[1, 20] = 1.0
+    failed[2, 30] = 1.0
+    out = metrics.summarize_tracking(reward, done, qpos, qpos, DT, fell, failed)
+    assert out["terminated_early_rate"] == 1.0  # old key still counts finishing as termination
+    assert out["completion_rate"] == pytest.approx(1 / 3)
+    assert out["fall_rate"] == pytest.approx(1 / 3)
+    assert out["tracking_fail_rate"] == pytest.approx(1 / 3)
+    assert out["survival_time_s_mean"] == pytest.approx((50 + 21 + 31) / 3 * DT)
+
+
+def test_tracking_fell_and_failed_same_step_counts_as_fall_only():
+    reward, done, qpos = _tracking_inputs({0: 10}, n=1)
+    flag = np.zeros_like(done)
+    flag[0, 10] = 1.0
+    out = metrics.summarize_tracking(reward, done, qpos, qpos, DT, flag, flag)
+    assert out["fall_rate"] == 1.0 and out["tracking_fail_rate"] == 0.0 and out["completion_rate"] == 0.0
+
+
+def test_tracking_cause_flags_after_first_done_are_ignored():
+    reward, done, qpos = _tracking_inputs({0: 49}, n=1)
+    fell = np.zeros_like(done)
+    fell[0, 49] = 0.0
+    out = metrics.summarize_tracking(reward, done, qpos, qpos, DT, fell, np.zeros_like(done))
+    assert out["completion_rate"] == 1.0 and out["fall_rate"] == 0.0
+
+
+def test_eval_mode_starts_mimic_at_clip_start():
+    pytest.importorskip("jax")
+    pytest.importorskip("mujoco_playground")
+    from humanoid_mimic_rl import tasks
+    from humanoid_mimic_rl.envs import mimic
+
+    assert tasks.mimic_overrides(False, None) == {}
+    assert tasks.mimic_overrides(True, None) == {"rsi_start_prob": 1.0}
+    assert tasks.mimic_overrides(False, "height_tilt") == {"termination": "height_tilt"}
+    assert mimic.default_config().rsi_start_prob < 1.0  # training keeps RSI

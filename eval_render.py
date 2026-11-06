@@ -199,6 +199,9 @@ def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, ja
         else:
             out["feet_contact"] = env.feet_contact(d)
             out["time"] = d.time  # clip time for the mimic tracking metrics
+            if "fell" in state.metrics:
+                out["fell"] = state.metrics["fell"]
+                out["tracking_failed"] = state.metrics["tracking_failed"]
         if task == "getup":
             out["standing"] = state.metrics["standing"]
         return out
@@ -248,13 +251,16 @@ def summarize(
     """Task metrics. Mimic tasks: tracking metrics, plus flip metrics if the clip is a flip."""
     if clip is not None:
         out = metrics.summarize_tracking(tr["reward"], tr["done"], tr["qpos"],
-                                         reference.sample_qpos_batch(clip, tr["time"]), dt)
+                                         reference.sample_qpos_batch(clip, tr["time"]), dt,
+                                         tr["fell"], tr["tracking_failed"])
         if not metrics.is_flip_clip(clip.qpos):
             return out
-        out.update(metrics.summarize_flip(
+        flip = metrics.summarize_flip(
             tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["height_m"], tr["feet_contact"], dt,
             FLIP_ROTATION_TOLERANCE_RAD, FLIP_LAND_MIN_UP_Z, FLIP_LAND_HEIGHT_FRAC * home_height_m,
-        ))
+        )
+        flip["flip_fall_rate"] = flip.pop("fall_rate")  # not the simulator fall_rate of summarize_tracking
+        out.update(flip)
         return out
     if task == "walk":
         return metrics.summarize_walk(tr["reward"], tr["done"], tr["local_linvel"], tr["command"],
@@ -284,7 +290,8 @@ def main() -> None:
 
     hold = run_cfg["env_config"].get("hold_final_s")
     env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True,
-                         hold_final_s=hold, torque_scale=run_cfg["env_config"].get("torque_scale"))
+                         hold_final_s=hold, torque_scale=run_cfg["env_config"].get("torque_scale"),
+                         termination=run_cfg["env_config"].get("termination"))
     model_label = getattr(env.unwrapped, "model_label", None)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)

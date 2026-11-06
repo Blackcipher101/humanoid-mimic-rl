@@ -536,6 +536,8 @@ class SuperMimicTrainer:
                     "reward": s.reward,
                     "done": s.done,
                     "qpos": s.data.qpos,
+                    "fell": s.metrics["fell"],
+                    "tracking_failed": s.metrics["tracking_failed"],
                     "time": s.data.time,
                     "up_z": jax.vmap(eval_env.up_z)(s.data),
                     "feet_contact": jax.vmap(eval_env.feet_contact)(s.data),
@@ -566,14 +568,17 @@ def summarize_eval(
     (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip."""
     tr = {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
     ref = reference.sample_qpos_batch(clip, tr["time"])
-    out = metrics.summarize_tracking(tr["reward"], tr["done"], tr["qpos"], ref, ctrl_dt_s)
+    out = metrics.summarize_tracking(
+        tr["reward"], tr["done"], tr["qpos"], ref, ctrl_dt_s, tr["fell"], tr["tracking_failed"]
+    )
     if metrics.is_flip_clip(clip.qpos):
-        out.update(
-            metrics.summarize_flip(
-                tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["qpos"][..., 2], tr["feet_contact"],
-                ctrl_dt_s, 0.5, 0.8, 0.75 * home_height_m,
-            )
+        flip = metrics.summarize_flip(
+            tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["qpos"][..., 2], tr["feet_contact"],
+            ctrl_dt_s, 0.5, 0.8, 0.75 * home_height_m,
         )
+        # The flip "fall_rate" (not upright at the end, or terminated) is a different quantity.
+        flip["flip_fall_rate"] = flip.pop("fall_rate")
+        out.update(flip)
     return out
 
 

@@ -53,6 +53,9 @@ def parse_args() -> argparse.Namespace:
                    help="G1 flip tasks: peak-torque multiplier; must match the clip report (default: read from it)")
     p.add_argument("--hold-final-s", type=float, default=None,
                    help="hold the last frame this long after the clip (default 0.6 s; 0 for walking)")
+    p.add_argument("--termination", default=None, choices=("root_pose", "height_tilt"),
+                   help="mimic tasks: root_pose (default: 3D root drift / full orientation) or height_tilt "
+                        "(SuperMimic App. A: root height and tilt error only)")
     return p.parse_args()
 
 
@@ -88,9 +91,9 @@ def main() -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
     env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
-                         torque_scale=args.torque_scale)
+                         torque_scale=args.torque_scale, termination=args.termination)
     eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
-                         torque_scale=args.torque_scale)
+                         torque_scale=args.torque_scale, termination=args.termination, eval_mode=True)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
     run_config = {
@@ -99,6 +102,7 @@ def main() -> None:
         "profile": args.profile,
         "impl": args.impl,
         "seed": args.seed,
+        "termination": env.unwrapped._config.termination,  # pylint: disable=protected-access
         "supermimic": dataclasses.asdict(cfg),
         "env_config": env.unwrapped._config.to_dict(),  # pylint: disable=protected-access
         "model_label": getattr(env.unwrapped, "model_label", None),
@@ -157,14 +161,15 @@ def main() -> None:
             f.write(json.dumps(record) + "\n")
         task_m = (
             f"landing={ev['landing_success_rate']:.2f} max_rot={ev['max_backward_rotation_rad_mean']:.2f}rad "
-            f"fall={ev['fall_rate']:.2f} "
+            f"flip_fall={ev['flip_fall_rate']:.2f} "
             if "landing_success_rate" in ev
             else ""
         )
         print(
             f"[eval] it {it:,}/{cfg.num_iterations:,} ({100.0 * it / cfg.num_iterations:5.1f}%) "
             f"return={ev['episode_return_mean']:.3f} survival={ev['survival_time_s_mean']:.2f}s "
-            f"complete={ev['completion_rate']:.2f} root_err={ev['root_pos_error_m']:.3f}m "
+            f"complete={ev['completion_rate']:.2f} fall={ev['fall_rate']:.2f} "
+            f"track_fail={ev['tracking_fail_rate']:.2f} root_err={ev['root_pos_error_m']:.3f}m "
             f"ori_err={ev['root_orientation_error_rad']:.3f}rad joint_rmse={ev['joint_rmse_rad']:.3f}rad "
             f"{task_m}| wm_loss={train_m['wm/loss']:.4f} "
             f"J_img={train_m['policy/imagined_return']:.3e} v_loss={train_m['critic/loss']:.2e} "
