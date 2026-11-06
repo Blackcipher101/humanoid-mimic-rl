@@ -18,28 +18,30 @@ deterministic policy over 128 episodes of 20 s. Rows stay blank until measured.
 | task | env steps | train wall time | env steps/s | episode return | success rate | fall rate | task metric |
 |---|---|---|---|---|---|---|---|
 | walk (vx 0.5 m/s) | 151.4 M | 71 min (4255 s incl. JIT) | ~36.9 k | 46.56 ± 0.25 | 1.00 | 0.00 | fwd speed abs err (m/s): 0.052 (mean speed 0.466) |
-| getup | | | | | | | median time to stand (s): |
-| backflip | | | | | | | max back rotation (rad): / landing success: |
+| getup (v1 reward) | 100.3 M | 37 min | ~51.8 k | 9.49 ± 0.54 | 0.00 (0/128 stood) | 0.00 | converged to sitting upright on the floor |
+| backflip | 151 M | ~85 min | ~28-37 k | 3.25 ± 0.03 | 0.00 | 1.00 | max back rotation 0.23 rad; 0 full rotations |
 | mimic (keyframed backflip), PPO | | | | | | | max back rotation (rad): / landing success: |
 | mimic (keyframed backflip), SuperMimic | (iterations:) | | (it/s:) | | | | max back rotation (rad): / landing success: |
 
 ## What was verified (and what was not)
 
-Verified locally (laptop, no JAX): 86 unit tests pass for the reward kernels,
-quaternion math, clip I/O / velocities / sampling, keyframe interpolation,
-clip fitting (toy kinematics), metrics, and the SuperMimic state
-representation (integrate/target round trip, yaw invariance, replay window masks); the full-collision T1 model
-compiles with mujoco 3.17 from playground 0.2.0's XMLs + menagerie meshes,
-joint order / home pose / ranges match the constants, the home pose stands on
-the floor, and the backflip clip was generated without floor penetration.
-`pyflakes` is clean.
+**Run on the GPU (workstation1, RTX 5080):** smoke tests of all 5 tasks, then full training for walk, getup (v1
+reward), backflip and mimic.
+- **walk** works: 0 falls in 128 × 20 s episodes (table above).
+- **getup v1** converged to a local optimum, sitting upright, because separate upright and height rewards paid for a
+  straight-backed sit. Reward v2 (`tall_upright` product, squared height, feet-under-torso shaping; tests in
+  `tests/test_rewards.py`) is training.
+- **backflip and mimic did not learn**, and inverse dynamics (`mj_inverse`) on the keyframed T1 reference clip shows
+  why:
+  - In flight the clip needs a wrench of up to 3.7 kN and 1.9 kN·m on the floating base. That must be about 0, so the
+    clip is not ballistic.
+  - It needs joint torques far beyond the T1 model's limits: hip pitch 488 vs 45 N·m, ankle 222 vs 20, knee 348 vs 60,
+    shoulder 93 vs 18. 9 of the 23 joints are over their limit.
+- **The flip is moving to the Unitree G1,** with a physically valid reference: ballistic flight, conserved angular
+  momentum, and torques within limits, checked by the same inverse-dynamics test before training.
 
-Not verified: anything that imports JAX/MJX/playground/Flax/Optax (`envs/*`,
-`tasks.py`, `train.py`, `train_supermimic.py`, `supermimic/trainer.py`,
-`supermimic/networks.py`, `eval_render.py`) has never been executed; APIs were
-checked against the playground 0.2.0, brax 0.14.2 and mujoco-mjx 3.17 sources
-(Flax/Optax calls from memory: `flax.linen`, `flax.serialization`,
-`optax.chain/clip_by_global_norm/clip/adam/cosine_decay_schedule`).
-No policy has been trained; whether the T1's actuators (knee 60 N m, hip pitch
-45 N m, joint damping 3 N m s/rad) can produce a 0.5 s-flight backflip is
-unknown.
+**Fixes made during the runs:**
+- jax pinned to 0.9.2, because 0.12 removed `jax.device_put_replicated`, which brax 0.14.2 uses;
+- `eval_render.py` loads PPO checkpoints whose saved config has null initialisers (a brax 0.14.2 `load_config` bug).
+
+**Laptop tests:** 87 unit tests pass (`pytest -q`).

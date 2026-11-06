@@ -19,10 +19,10 @@ Workstation RTX 5080, deterministic policy, 128 episodes of 20 s (`eval/metrics.
 | task | env | method | status |
 |---|---|---|---|
 | `walk` | playground `T1JoystickFlatTerrain` (unchanged) | playground's joystick reward | trained and evaluated |
-| `getup` | `T1Getup` (new) | hand-shaped upright / height / posture reward | smoke test only (1 M steps, no skill learned) |
-| `backflip` | `T1Backflip` (new) | hand-shaped keyframe / phase reward | smoke test only |
-| `mimic` | `T1Mimic` (new) | DeepMimic tracking reward + RSI + early termination | smoke test only |
-| `supermimic` | same `T1Mimic` env | learned world model + backprop through imagined rollouts | smoke test only |
+| `getup` | `T1Getup` (new) | hand-shaped upright / height / posture reward | v1 sat upright (0/128 stood); v2 reward training |
+| `backflip` | `T1Backflip` (new) | hand-shaped keyframe / phase reward | failed on T1 (clip infeasible, torques ~10x limits); moving to Unitree G1 |
+| `mimic` | `T1Mimic` (new) | DeepMimic tracking reward + RSI + early termination | failed on T1 (same infeasible clip); moving to Unitree G1 |
+| `supermimic` | same `T1Mimic` env | learned world model + backprop through imagined rollouts | smoke test only; full run after the G1 clip |
 
 Full runs of `getup`, `backflip`, `mimic` and `supermimic` are in progress.
 
