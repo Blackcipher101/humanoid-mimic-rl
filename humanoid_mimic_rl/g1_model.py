@@ -149,6 +149,15 @@ def full_collision_flat_scene(assets: Mapping[str, bytes]) -> tuple[str, dict[st
 # ----------------------------------------------------------------------
 G1_EDU_MAX_JOINT_TORQUE_NM = 120.0
 
+
+def torque_scale_label(scale: float) -> str:
+    """Human-readable disclaimer for any artefact produced with a torque scale != 1."""
+    if scale == 1.0:
+        return "G1 with published peak torques"
+    return (
+        f"G1 with {scale:g}x published peak torque - a modified model, not the real robot's limits"
+    )
+
 # PD-to-torque layer of the flip envs (a design choice, not Unitree gains):
 # full peak torque at FLIP_PD_FULL_TORQUE_ERROR_RAD of position error, damping
 # kd = FLIP_PD_KD_PER_KP * kp, targets may exceed the joint range by
@@ -159,11 +168,19 @@ FLIP_PD_KD_PER_KP = 0.02  # s
 FLIP_PD_TARGET_SLACK_RAD = 0.25
 
 
-def flip_peak_torques(model: object) -> np.ndarray:
-    """Per-actuator peak torque (N m) for the flip tasks: min(model force limit, 120 N m)."""
+def flip_peak_torques(model: object, torque_scale: float = 1.0) -> np.ndarray:
+    """Per-actuator peak torque (N m) for the flip tasks:
+    ``torque_scale * min(model force limit, 120 N m)``.
+
+    ``torque_scale`` > 1 is an explicit owner decision for the flip tasks: the
+    published limits did not admit a feasible backflip in the trajectory
+    optimiser. Anything produced with it must carry ``torque_scale_label``.
+    """
+    if not torque_scale > 0.0:
+        raise ValueError(f"torque_scale must be positive, got {torque_scale}")
     jnt = model.actuator_trnid[:, 0]
     model_limit = np.max(np.abs(model.jnt_actfrcrange[jnt]), axis=1)
-    return np.minimum(model_limit, G1_EDU_MAX_JOINT_TORQUE_NM)
+    return torque_scale * np.minimum(model_limit, G1_EDU_MAX_JOINT_TORQUE_NM)
 
 
 def flip_pd_gains(peak_nm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
