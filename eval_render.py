@@ -198,6 +198,7 @@ def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, ja
             out["command"] = state.info["command"]
         else:
             out["feet_contact"] = env.feet_contact(d)
+            out["time"] = d.time  # clip time for the mimic tracking metrics
         if task == "getup":
             out["standing"] = state.metrics["standing"]
         return out
@@ -241,7 +242,20 @@ def rollout(
     return {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
 
 
-def summarize(task: str, tr: dict[str, np.ndarray], dt: float, home_height_m: float) -> dict[str, float]:
+def summarize(
+    task: str, tr: dict[str, np.ndarray], dt: float, home_height_m: float, clip: reference.ReferenceClip | None
+) -> dict[str, float]:
+    """Task metrics. Mimic tasks: tracking metrics, plus flip metrics if the clip is a flip."""
+    if clip is not None:
+        out = metrics.summarize_tracking(tr["reward"], tr["done"], tr["qpos"],
+                                         reference.sample_qpos_batch(clip, tr["time"]), dt)
+        if not metrics.is_flip_clip(clip.qpos):
+            return out
+        out.update(metrics.summarize_flip(
+            tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["height_m"], tr["feet_contact"], dt,
+            FLIP_ROTATION_TOLERANCE_RAD, FLIP_LAND_MIN_UP_Z, FLIP_LAND_HEIGHT_FRAC * home_height_m,
+        ))
+        return out
     if task == "walk":
         return metrics.summarize_walk(tr["reward"], tr["done"], tr["local_linvel"], tr["command"],
                                       tr["up_z"], tr["height_m"], dt, metrics.FallCriteria())
@@ -278,7 +292,7 @@ def main() -> None:
 
     tr = rollout(env, policy, task, args.num_episodes, steps, args.seed, np.asarray(args.walk_command))
     home_height_m = getattr(env, "HOME_ROOT_HEIGHT_M", t1_model.T1_HOME_ROOT_HEIGHT_M)
-    summary = summarize(task, tr, env.dt, home_height_m)
+    summary = summarize(task, tr, env.dt, home_height_m, getattr(env.unwrapped, "clip", None))
     result = {
         "task": task,
         "algo": algo,

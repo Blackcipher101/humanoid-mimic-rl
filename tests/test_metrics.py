@@ -89,3 +89,37 @@ def test_getup_metrics():
     assert out["stood_up_rate"] == pytest.approx(2 / 3)
     assert out["fall_rate"] == pytest.approx(1 / 3)
     assert out["time_to_stand_s_median"] == pytest.approx(2.0)
+
+
+def test_tracking_metrics_and_flip_detection():
+    from humanoid_mimic_rl import reference
+
+    n_t = 50
+    t = np.arange(n_t) / 50.0
+    ref = np.zeros((n_t, 9))
+    ref[:, 0] = 0.5 * t
+    ref[:, 2] = 0.66
+    ref[:, 3] = 1.0
+    ref[:, 7:] = 0.2
+    clip = reference.ReferenceClip(
+        fps_hz=50.0, qpos=ref, qvel=reference.finite_difference_qvel(ref, 50.0), joint_names=("a", "b"),
+        site_names=(), site_pos=np.zeros((n_t, 0, 3)), licence="test", source="test",
+    )
+    times = np.tile(t, (2, 1))
+    sampled = reference.sample_qpos_batch(clip, times)
+    np.testing.assert_allclose(sampled[0], ref, atol=1e-12)
+    qpos = sampled.copy()
+    qpos[:, :, 0] += 0.1  # 10 cm behind/ahead everywhere
+    qpos[:, :, 7:] += 0.05
+    done = np.zeros((2, n_t))
+    done[1, 24] = 1.0
+    out = metrics.summarize_tracking(np.ones((2, n_t)), done, qpos, sampled, 0.02)
+    assert out["root_pos_error_m"] == pytest.approx(0.1)
+    assert out["joint_rmse_rad"] == pytest.approx(0.05)
+    assert out["root_orientation_error_rad"] == pytest.approx(0.0, abs=1e-9)
+    assert out["completion_rate"] == 0.5
+    assert out["survival_time_s_mean"] == pytest.approx((50 + 25) / 2 * 0.02)
+    assert not metrics.is_flip_clip(ref)
+    flip = ref.copy()
+    flip[:, 3:7] = quat.quat_from_axis_angle(Y, np.linspace(0, -2 * np.pi, n_t), np)
+    assert metrics.is_flip_clip(flip)
