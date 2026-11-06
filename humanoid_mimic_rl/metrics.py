@@ -207,3 +207,33 @@ def summarize_flip(
         fall_rate=float(np.mean(~upright_end)),
     )
     return out
+
+
+def is_flip_clip(qpos: np.ndarray, min_rotation_rad: float = np.pi) -> bool:
+    """True if the reference root rotates more than ``min_rotation_rad`` about its lateral axis."""
+    return bool(np.max(np.abs(cumulative_pitch_rad(qpos[None, :, 3:7]))) > min_rotation_rad)
+
+
+def summarize_tracking(
+    reward: np.ndarray, done: np.ndarray, qpos: np.ndarray, ref_qpos: np.ndarray, ctrl_dt_s: float
+) -> dict[str, float]:
+    """Reference-tracking metrics over the alive part of each episode.
+
+    ``ref_qpos`` is the reference at the time of every recorded step. Errors are
+    averaged over alive steps per episode, then over episodes:
+    root position error (m), root orientation error (geodesic, rad), joint RMSE
+    (rad), survival time (s) and the fraction of episodes that never terminated.
+    """
+    mask = alive_mask(done)
+    pos_err = np.linalg.norm(qpos[..., 0:3] - ref_qpos[..., 0:3], axis=-1)
+    ang_err = quat.quat_angle_between(qpos[..., 3:7], ref_qpos[..., 3:7], np)
+    joint_rmse = np.sqrt(np.mean(np.square(qpos[..., 7:] - ref_qpos[..., 7:]), axis=-1))
+    out = summarize_common(reward, done, ctrl_dt_s)
+    out.update(
+        survival_time_s_mean=float(np.mean(episode_lengths(done)) * ctrl_dt_s),
+        completion_rate=float(np.mean(~terminated_early(done))),
+        root_pos_error_m=float(np.nanmean(_masked_mean(pos_err, mask))),
+        root_orientation_error_rad=float(np.nanmean(_masked_mean(ang_err, mask))),
+        joint_rmse_rad=float(np.nanmean(_masked_mean(joint_rmse, mask))),
+    )
+    return out

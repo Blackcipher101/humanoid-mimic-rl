@@ -42,7 +42,7 @@ from brax.training.acme import running_statistics
 from flax import struct
 from mujoco import mjx
 
-from humanoid_mimic_rl import metrics
+from humanoid_mimic_rl import metrics, reference
 from humanoid_mimic_rl.envs.backflip import phase_features
 from humanoid_mimic_rl.envs.mimic import MimicTask
 from humanoid_mimic_rl.supermimic import networks
@@ -479,12 +479,23 @@ class SuperMimicTrainer:
         traj = jax.lax.stop_gradient(traj)
         targets = self._critic_targets(ts, traj, jax.lax.stop_gradient(crit_h))
         flat = lambda x: x.reshape((-1,) + x.shape[2:])  # noqa: E731  (H, B, ...) -> (H*B, ...)
-        ts, v_loss = self._critic_fit(ts, flat(traj["critic_obs"]), flat(targets), flat(traj["alive"]), k_crit)
+        obs_f, y, w = flat(traj["critic_obs"]), flat(targets), flat(traj["alive"])
+        ts, v_loss = self._critic_fit(ts, obs_f, y, w, k_crit)
+        # Rewards are scaled by the control dt, so returns (and the MSE) are small;
+        # explained variance is the scale-free measure of critic quality.
+        v = self.critic.apply(ts.v_params, _norm(obs_f, ts.critic_stats))
+        w_sum = jp.maximum(jp.sum(w), 1.0)
+        y_mean = jp.sum(w * y) / w_sum
+        var_y = jp.sum(w * jp.square(y - y_mean)) / w_sum
+        resid = y - v
+        var_r = jp.sum(w * jp.square(resid - jp.sum(w * resid) / w_sum)) / w_sum
         return ts, {
             "policy/imagined_return": jp.mean(ret),
             "policy/grad_norm": optax.global_norm(grads),
             "policy/imagined_alive_frac": jp.mean(traj["alive"][-1]),
             "critic/loss": v_loss,
+            "critic/target_std": jp.sqrt(var_y),
+            "critic/explained_variance": 1.0 - var_r / jp.maximum(var_y, 1e-12),
         }
 
     # ------------------------------------------------------------------
@@ -525,6 +536,7 @@ class SuperMimicTrainer:
                     "reward": s.reward,
                     "done": s.done,
                     "qpos": s.data.qpos,
+                    "time": s.data.time,
                     "up_z": jax.vmap(eval_env.up_z)(s.data),
                     "feet_contact": jax.vmap(eval_env.feet_contact)(s.data),
                 }
@@ -547,13 +559,22 @@ class SuperMimicTrainer:
         return out
 
 
-def summarize_eval(traj: dict[str, jax.Array], ctrl_dt_s: float, home_height_m: float) -> dict[str, float]:
-    """Flip metrics (``metrics.summarize_flip``) from an eval rollout, ``(T, N, ...)`` -> per-episode."""
+def summarize_eval(
+    traj: dict[str, jax.Array], ctrl_dt_s: float, home_height_m: float, clip: reference.ReferenceClip
+) -> dict[str, float]:
+    """Eval metrics from a ``(T, N, ...)`` rollout: tracking metrics for every clip
+    (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip."""
     tr = {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
-    return metrics.summarize_flip(
-        tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["qpos"][..., 2], tr["feet_contact"],
-        ctrl_dt_s, 0.5, 0.8, 0.75 * home_height_m,
-    )
+    ref = reference.sample_qpos_batch(clip, tr["time"])
+    out = metrics.summarize_tracking(tr["reward"], tr["done"], tr["qpos"], ref, ctrl_dt_s)
+    if metrics.is_flip_clip(clip.qpos):
+        out.update(
+            metrics.summarize_flip(
+                tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["qpos"][..., 2], tr["feet_contact"],
+                ctrl_dt_s, 0.5, 0.8, 0.75 * home_height_m,
+            )
+        )
+    return out
 
 
 def load_policy(checkpoint: Path, cfg_json: Path) -> Callable[[dict[str, jax.Array], jax.Array], tuple[jax.Array, dict]]:

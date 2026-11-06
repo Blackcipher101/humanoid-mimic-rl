@@ -138,7 +138,7 @@ def main() -> None:
             continue
         train_m = _floats(m)
         traj = eval_fn(ts.pi_params, ts.obs_stats, eval_key)
-        ev = sm.summarize_eval(traj, env.dt, env.HOME_ROOT_HEIGHT_M)
+        ev = sm.summarize_eval(traj, env.dt, env.HOME_ROOT_HEIGHT_M, env.clip)
         now = time.monotonic()
         it_s = (it - 1) / (now - t_first) if t_first and now > t_first and it > 1 else float("nan")
         eta = (cfg.num_iterations - it) / it_s if it_s == it_s and it_s > 0 else float("nan")
@@ -155,12 +155,20 @@ def main() -> None:
         }
         with (run_dir / "progress.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
+        task_m = (
+            f"landing={ev['landing_success_rate']:.2f} max_rot={ev['max_backward_rotation_rad_mean']:.2f}rad "
+            f"fall={ev['fall_rate']:.2f} "
+            if "landing_success_rate" in ev
+            else ""
+        )
         print(
             f"[eval] it {it:,}/{cfg.num_iterations:,} ({100.0 * it / cfg.num_iterations:5.1f}%) "
-            f"return={ev['episode_return_mean']:.3f} ep_len={ev['episode_length_s_mean']:.2f}s "
-            f"landing={ev['landing_success_rate']:.2f} max_rot={ev['max_backward_rotation_rad_mean']:.2f}rad "
-            f"fall={ev['fall_rate']:.2f} | wm_loss={train_m['wm/loss']:.4f} "
-            f"J_img={train_m['policy/imagined_return']:.3f} v_loss={train_m['critic/loss']:.4f} "
+            f"return={ev['episode_return_mean']:.3f} survival={ev['survival_time_s_mean']:.2f}s "
+            f"complete={ev['completion_rate']:.2f} root_err={ev['root_pos_error_m']:.3f}m "
+            f"ori_err={ev['root_orientation_error_rad']:.3f}rad joint_rmse={ev['joint_rmse_rad']:.3f}rad "
+            f"{task_m}| wm_loss={train_m['wm/loss']:.4f} "
+            f"J_img={train_m['policy/imagined_return']:.3e} v_loss={train_m['critic/loss']:.2e} "
+            f"v_expl_var={train_m['critic/explained_variance']:.2f} "
             f"collect_ret={train_m['collect/episode_return']:.3f} | "
             f"elapsed={now - t0:.0f}s it/s={it_s:.2f} eta={eta:.0f}s",
             flush=True,

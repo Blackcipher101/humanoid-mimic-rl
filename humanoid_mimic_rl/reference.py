@@ -202,3 +202,20 @@ def sample_clip(
     v = xp.where(past_end, 0.0, lerp(qvel))
     s = lerp(site_pos)
     return q, v, s
+
+
+def sample_qpos_batch(clip: ReferenceClip, times_s: np.ndarray) -> np.ndarray:
+    """Reference ``qpos`` at an array of times (any shape) -> ``times.shape + (nq,)`` (numpy).
+
+    Same interpolation as ``sample_clip`` (linear, nlerp for the root quaternion,
+    clamped to the clip, holding the last frame after its end).
+    """
+    t = np.asarray(times_s, dtype=np.float64)
+    n = clip.num_frames
+    f = np.clip(t * clip.fps_hz, 0.0, n - 1.0)
+    i0 = np.clip(np.floor(f).astype(np.int64), 0, n - 2)
+    a = (f - i0)[..., None]
+    q0, q1 = clip.qpos[i0], clip.qpos[i0 + 1]
+    out = q0 * (1.0 - a) + q1 * a
+    out[..., 3:7] = quat.quat_nlerp(q0[..., 3:7], q1[..., 3:7], a[..., 0], np)
+    return out
