@@ -14,7 +14,7 @@ geometry on the pelvis, torso or head. ``make_full_collision_xml`` adds
   and hand capsules (condim 3, friction 0.6 like playground's foot pairs).
 
 Every G1 body carries an explicit ``<inertial>``, so added geoms do not change
-masses or inertias. No new self-collision pairs are added.
+masses or inertias. ``SELF_COLLISION_PAIRS`` adds robot self-collision pairs (limbs, trunk, head, hands).
 """
 
 from __future__ import annotations
@@ -77,6 +77,34 @@ FLOOR_PAIR_GEOMS: tuple[str, ...] = (
     "left_hand_collision", "right_hand_collision",
 )  # fmt: skip
 
+# Robot self-collision pairs (playground's model has none: contype = conaffinity = 0 everywhere).
+# Chosen by measured geom distance (mj_geomDistance) at the home pose and over the retargeted CMU
+# backflip / spin-kick / cartwheel clips: every pair that came within ~0.2 m in those motions, minus
+# pairs that already overlap at the home pose because they meet at a joint (pelvis-thigh at the hip,
+# thigh-shin of the same leg at the knee, shin-foot of the same leg at the ankle) and pairs that never
+# came closer than 0.2 m (head-foot, pelvis-foot, torso-foot, hand-foot, pelvis-head, pelvis-torso
+# across the waist). Same-leg / same-arm chains are excluded for the same reason.
+SELF_COLLISION_PAIRS: tuple[tuple[str, str], ...] = (
+    # leg vs other leg
+    ("left_thigh", "right_thigh"), ("left_shin", "right_shin"),
+    ("left_thigh", "right_shin"), ("right_thigh", "left_shin"),
+    ("left_foot", "right_foot"), ("left_shin", "right_foot"), ("right_shin", "left_foot"),
+    # trunk / head vs legs (tucks, knee to chest)
+    ("torso_collision", "left_thigh"), ("torso_collision", "right_thigh"),
+    ("torso_collision", "left_shin"), ("torso_collision", "right_shin"),
+    ("head_collision", "left_shin"), ("head_collision", "right_shin"),
+    # hands vs everything they can reach
+    ("left_hand_collision", "right_hand_collision"),
+    ("left_hand_collision", "pelvis_collision"), ("right_hand_collision", "pelvis_collision"),
+    ("left_hand_collision", "torso_collision"), ("right_hand_collision", "torso_collision"),
+    ("left_hand_collision", "head_collision"), ("right_hand_collision", "head_collision"),
+    ("left_hand_collision", "left_thigh"), ("left_hand_collision", "right_thigh"),
+    ("right_hand_collision", "left_thigh"), ("right_hand_collision", "right_thigh"),
+    ("left_hand_collision", "left_shin"), ("left_hand_collision", "right_shin"),
+    ("right_hand_collision", "left_shin"), ("right_hand_collision", "right_shin"),
+)  # fmt: skip
+SELF_COLLISION_FRICTION = 0.5
+
 
 def home_pose() -> np.ndarray:
     return np.asarray(G1_HOME_JOINT_POS, dtype=np.float64)
@@ -87,7 +115,8 @@ def joint_index(name: str) -> int:
 
 
 def make_full_collision_xml(feet_only_xml: str) -> str:
-    """Return the G1 robot XML with trunk/head/limb colliders paired with the floor."""
+    """Return the G1 robot XML with trunk/head/limb colliders paired with the floor and with each other
+    (``SELF_COLLISION_PAIRS``)."""
     root = ET.fromstring(feet_only_xml)
     bodies = {b.get("name"): b for b in root.iter("body")}
     existing = {g.get("name") for g in root.iter("geom") if g.get("name")}
@@ -110,6 +139,13 @@ def make_full_collision_xml(feet_only_xml: str) -> str:
             contacts[0], "pair",
             {"name": f"{g}_floor", "geom1": g, "geom2": "floor", "condim": "3", "friction": "0.6 0.6"},
         )
+    mu = f"{SELF_COLLISION_FRICTION} {SELF_COLLISION_FRICTION}"
+    for g1, g2 in SELF_COLLISION_PAIRS:
+        for g in (g1, g2):
+            if g not in existing:
+                raise ValueError(f"self-collision geom {g!r} missing from G1 XML")
+        ET.SubElement(contacts[0], "pair", {"name": f"self_{g1}__{g2}", "geom1": g1, "geom2": g2,
+                                            "condim": "3", "friction": mu})
     return ET.tostring(root, encoding="unicode")
 
 
