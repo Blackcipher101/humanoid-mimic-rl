@@ -298,8 +298,8 @@ def test_shipped_g1_backflip_solution_is_feasible():
 
     if not g1_backflip.SOLUTION_PATH.is_file():
         pytest.skip("no optimised G1 backflip solution yet (run scripts/make_g1_backflip.py --optimize)")
-    x = g1_backflip.load_solution(g1_backflip.SOLUTION_PATH)
-    problem = g1_backflip.make_problem(_g1_assets(), 200.0)
+    x, scale = g1_backflip.load_solution(g1_backflip.SOLUTION_PATH)
+    problem = g1_backflip.make_problem(_g1_assets(), 400.0, scale)
     r = problem.rollout(x)
     assert r.landed
     clip = flip_opt.to_clip(problem, r, g1_model.G1_JOINT_NAMES, g1_model.END_EFFECTOR_SITES, "t", "t")
@@ -307,3 +307,56 @@ def test_shipped_g1_backflip_solution_is_feasible():
     assert rep.passes(0.85, g1_model.FOOT_FRICTION, 0.02 * rep.body_weight_n, 2.0), rep
     pitch = np.unwrap(2 * np.arctan2(clip.qpos[:, 5], clip.qpos[:, 3]))
     assert pitch[-1] - pitch[0] == pytest.approx(-2 * np.pi, abs=0.05)
+
+
+def test_torque_scale_multiplies_peaks_and_is_labelled(biped):
+    from humanoid_mimic_rl import g1_model
+
+    np.testing.assert_allclose(g1_model.flip_peak_torques(biped.m, 3.0), [360.0, 300.0, 360.0, 300.0])
+    with pytest.raises(ValueError):
+        g1_model.flip_peak_torques(biped.m, 0.0)
+    assert "modified model" in g1_model.torque_scale_label(3.0)
+    assert "3x published peak torque" in g1_model.torque_scale_label(3.0)
+    assert "modified" not in g1_model.torque_scale_label(1.0)
+
+
+def test_resolve_torque_scale_from_clip_report(tmp_path):
+    import json
+
+    from humanoid_mimic_rl import g1_model
+
+    clip = tmp_path / "flip.npz"
+    with pytest.raises(ValueError, match="not found"):
+        g1_model.resolve_torque_scale(clip, None)
+    report = g1_model.clip_report_path(clip)
+    report.write_text(json.dumps({"torque_scale": 4.0, "passed": True}))
+    assert g1_model.resolve_torque_scale(clip, None) == 4.0
+    assert g1_model.resolve_torque_scale(clip, 4.0) == 4.0
+    with pytest.raises(ValueError, match="!="):
+        g1_model.resolve_torque_scale(clip, 3.0)
+    report.write_text(json.dumps({"torque_scale": 4.0, "passed": False}))
+    with pytest.raises(ValueError, match="FAILED"):
+        g1_model.resolve_torque_scale(clip, None)
+
+
+def test_check_clip_guards_vanishing_normal_force(biped):
+    """Frames flagged as stance with ~zero normal force are counted, not divided by."""
+    import dataclasses
+    import json
+
+    from humanoid_mimic_rl import flip_dynamics as fd
+
+    p = _problem(biped, rate_hz=200.0)
+    x = p.pack(np.array([[0.3, 0.2], [-0.8, 0.5], [0.6, -0.4], [-0.2, 0.1]]), 0.5)
+    r = p.rollout(x)
+    contact = np.ones_like(r.contact)  # wrongly claim contact during the flight
+    clip = reference.ReferenceClip(
+        fps_hz=200.0, qpos=r.qpos, qvel=r.qvel, joint_names=("l_hip", "l_ankle", "r_hip", "r_ankle"),
+        site_names=(), site_pos=np.zeros((len(r.qpos), 0, 3)), licence="test", source="test",
+        foot_contact=contact,
+    )
+    rep = fd.check_clip(biped, clip, contact, clip.joint_names)
+    assert rep.stance_low_normal_frames > 10
+    assert np.isfinite(rep.stance_max_friction_ratio) and np.isfinite(rep.stance_max_cop_outside_m)
+    assert not rep.passes(0.85, 0.6, 1e9, 1e9)
+    json.dumps(dataclasses.asdict(rep), allow_nan=False)  # report is valid JSON (no inf / NaN)

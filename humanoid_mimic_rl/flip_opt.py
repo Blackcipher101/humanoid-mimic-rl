@@ -454,10 +454,12 @@ class FlipProblem:
             )
             out["eq_landing_pitch"] = np.array([(r.touchdown_foot_pitch + TWO_PI) / 0.05])
             out["ineq_landed"] = np.array([1.0 if r.landed else -10.0])
-            rise = float(np.max(r.qpos[:, 2]) - self.s.home_qpos[2])
-            travel = float(abs(r.qpos[-1, 0] - r.qpos[0, 0]))
-            out["ineq_apex"] = np.array([(s.max_apex_rise_m - rise) / 0.05])
-            out["ineq_travel"] = np.array([(s.max_travel_m - travel) / 0.05])
+            # Per sample (like the torque terms), so a too-high flight is penalised at
+            # every sample above the limit instead of by a single residual.
+            rise = r.qpos[:, 2] - self.s.home_qpos[2]
+            travel = np.abs(r.qpos[:, 0] - r.qpos[0, 0])
+            out["ineq_apex"] = (s.max_apex_rise_m - rise) / 0.02
+            out["ineq_travel"] = (s.max_travel_m - travel) / 0.02
         return out
 
     def violations(self, r: Rollout) -> dict[str, float]:

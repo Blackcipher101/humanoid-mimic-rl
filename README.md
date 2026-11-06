@@ -182,7 +182,7 @@ numbers are in `data/generated/g1_backflip.report.json`. `make_g1_backflip.py`
 exits non-zero when a check fails, so `run_ws1.sh` never trains G1 tasks on an
 infeasible clip.
 
-**Status: no feasible G1 backflip found yet.** Laptop runs, mujoco 3.17, 23 workers:
+**Status: no feasible G1 backflip at the published torques; see "Torque scale k" below.** Laptop runs, mujoco 3.17, 23 workers:
 
 * First attempt (ankle kp 20, waist held at 0): about 25 min of staged least
   squares plus 400 CMA-ES generations at torque margin 3.0. It still failed: no
@@ -241,6 +241,34 @@ the checker use the same actuator model.
 * Earlier attempts (playground servos, then Unitree-sourced ankle kp 40) are
   superseded. The A/B above showed that the servo caps, not the optimiser, were
   binding.
+
+**Torque scale k (owner decision): "G1 with k x published peak torque - a
+modified model, not the real robot's limits".** The ws1 run of `3d2e1d8`
+(torque motors at the published peaks) still failed. Its flight wrench passed
+(4.5 N, 0.55 N m), but the torque ratio reached 5.7, with hip pitch, knee,
+ankle pitch, waist pitch and shoulder pitch over their limits, and the apex
+rise was 0.84 m. Only for the flip tasks, every peak torque is multiplied by
+an explicit k:
+
+* `scripts/make_g1_backflip.py --optimize --torque-scales 3 4 6` optimises for
+  each k in turn, warm-starting from the previous best, and stops at the first
+  k that PASSES the unchanged checker (0.85 margin). The smallest passing k is
+  recorded in `<clip>.report.json` (`torque_scale`, `model_label`), in the
+  solution JSON and in `<clip>.sweep.json`.
+* The G1 flip envs read k from the clip report
+  (`g1_model.resolve_torque_scale`). They refuse a clip that failed the check
+  or a mismatched `--torque-scale`. Run configs, `metrics.json` and the
+  rollout videos carry the label; it is burned into the frames when k != 1.
+* T1 tasks and playground's shared G1 are unaffected.
+
+Fixes in this round:
+* the apex-rise and travel limits are now per-sample constraints. A single
+  residual was drowned by the per-sample torque terms; the ws1 apex was still
+  0.84 m;
+* the checker counts stance frames with a per-foot normal force below 1 % of
+  body weight as a failure (`stance_low_normal_frames`), instead of dividing by
+  it. The ws1 friction ratio of 3e10 came from F_z ~ 0. Reports are written
+  with `allow_nan=False`, so no inf/None appears.
 
 Local trend check for the torque-motor formulation (laptop, take-off least squares
 then 120 CMA-ES generations at margin 2.0, from the initial guess): still

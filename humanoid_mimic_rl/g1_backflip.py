@@ -62,11 +62,12 @@ LICENCE = (
 SOURCE = "humanoid_mimic_rl.g1_backflip + flip_opt (ballistic flight, inverse-dynamics constrained)"
 
 
-def load_model(assets: Mapping[str, bytes]) -> mujoco.MjModel:
-    """Full-collision G1 with the flip tasks' torque motors (``g1_model.flip_peak_torques``)."""
+def load_model(assets: Mapping[str, bytes], torque_scale: float = 1.0) -> mujoco.MjModel:
+    """Full-collision G1 with the flip tasks' torque motors
+    (``g1_model.flip_peak_torques(model, torque_scale)``; != 1 is a modified robot)."""
     scene, full_assets = g1_model.full_collision_flat_scene(assets)
     model = mujoco.MjModel.from_xml_string(scene, assets=full_assets)
-    g1_model.to_torque_motors(model, g1_model.flip_peak_torques(model))
+    g1_model.to_torque_motors(model, g1_model.flip_peak_torques(model, torque_scale))
     return model
 
 
@@ -77,8 +78,10 @@ def floating_base(model: mujoco.MjModel) -> fd.FloatingBaseModel:
     return fd.FloatingBaseModel(model, feet, g1_model.FLOOR_PAIR_GEOMS)
 
 
-def make_problem(assets: Mapping[str, bytes], sample_rate_hz: float) -> flip_opt.FlipProblem:
-    model = load_model(assets)
+def make_problem(
+    assets: Mapping[str, bytes], sample_rate_hz: float, torque_scale: float = 1.0
+) -> flip_opt.FlipProblem:
+    model = load_model(assets, torque_scale)
     setup = flip_opt.FlipSetup(
         groups=GROUPS,
         home_qpos=model.keyframe("home").qpos.copy(),
@@ -99,5 +102,7 @@ def save_solution(path: Path, x: np.ndarray, info: dict[str, object]) -> None:
     path.write_text(json.dumps({"params": [float(v) for v in x], **info}, indent=2), encoding="utf-8")
 
 
-def load_solution(path: Path) -> np.ndarray:
-    return np.asarray(json.loads(path.read_text(encoding="utf-8"))["params"], dtype=np.float64)
+def load_solution(path: Path) -> tuple[np.ndarray, float]:
+    """Parameters and the torque scale they were optimised for (1.0 if not recorded)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return np.asarray(data["params"], dtype=np.float64), float(data.get("torque_scale", 1.0))

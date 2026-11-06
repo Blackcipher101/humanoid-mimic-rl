@@ -19,8 +19,10 @@ masses or inertias. No new self-collision pairs are added.
 
 from __future__ import annotations
 
+import json
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from pathlib import Path
 
 import numpy as np
 
@@ -181,6 +183,32 @@ def flip_peak_torques(model: object, torque_scale: float = 1.0) -> np.ndarray:
     jnt = model.actuator_trnid[:, 0]
     model_limit = np.max(np.abs(model.jnt_actfrcrange[jnt]), axis=1)
     return torque_scale * np.minimum(model_limit, G1_EDU_MAX_JOINT_TORQUE_NM)
+
+
+def clip_report_path(clip_path: Path) -> Path:
+    """``<clip>.report.json`` written next to a clip by ``scripts/make_g1_backflip.py``."""
+    return Path(clip_path).with_suffix(".report.json")
+
+
+def resolve_torque_scale(clip_path: Path, requested: float | None) -> float:
+    """Torque scale a G1 flip env must use for ``clip_path``.
+
+    The clip's report records the scale the clip was optimised and checked
+    with; training on it with a different scale would make the reference
+    infeasible (or the robot stronger than the check). ``requested`` (e.g. a
+    ``--torque-scale`` flag) must match it if given.
+    """
+    report = clip_report_path(clip_path)
+    if not report.is_file():
+        raise ValueError(f"{report} not found; build the clip with scripts/make_g1_backflip.py")
+    recorded = json.loads(report.read_text(encoding="utf-8")).get("torque_scale")
+    if recorded is None:
+        raise ValueError(f"{report} has no torque_scale; regenerate the clip")
+    if not json.loads(report.read_text(encoding="utf-8")).get("passed", False):
+        raise ValueError(f"{clip_path} FAILED the feasibility check ({report}); refusing to use it")
+    if requested is not None and float(requested) != float(recorded):
+        raise ValueError(f"--torque-scale {requested} != {recorded} recorded for {clip_path}")
+    return float(recorded)
 
 
 def flip_pd_gains(peak_nm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

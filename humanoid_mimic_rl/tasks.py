@@ -7,7 +7,7 @@ from pathlib import Path
 from mujoco_playground import registry
 from mujoco_playground._src import mjx_env
 
-from humanoid_mimic_rl import reference
+from humanoid_mimic_rl import g1_model, reference
 from humanoid_mimic_rl.envs import backflip, g1_flip, getup, mimic
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +28,7 @@ def make_env(
     reference_path: Path | None = None,
     eval_mode: bool = False,
     hold_final_s: float | None = None,
+    torque_scale: float | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -41,6 +42,8 @@ def make_env(
       hold_final_s: mimic tasks only: seconds the reference holds its last frame
         after the clip ends (default: the env config's 0.6 s; use 0 for cyclic
         motions such as walking, where an abrupt stop is not wanted).
+      torque_scale: G1 flip tasks only: multiplier on the published peak torques.
+        Default and required value: the one recorded in ``<clip>.report.json``.
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. Observation noise is kept in all tasks.
     """
@@ -71,12 +74,13 @@ def make_env(
         return mimic.T1Mimic(cfg, overrides)
     if task in ("g1_backflip", "g1_mimic"):
         path = (reference_path or G1_REFERENCE_PATH).resolve()
+        scale = g1_model.resolve_torque_scale(path, torque_scale)
         if task == "g1_backflip":
-            return g1_flip.G1Backflip(g1_flip.backflip_config(str(path)), overrides)
-        cfg = mimic.default_config()
+            return g1_flip.G1Backflip(g1_flip.backflip_config(str(path), scale), overrides)
+        cfg = g1_flip.mimic_config(scale)
         clip = reference.load_clip(path)
-        overrides["reference_path"] = str(path)
         hold = cfg.hold_final_s if hold_final_s is None else float(hold_final_s)
+        overrides["reference_path"] = str(path)
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
         return g1_flip.G1Mimic(cfg, overrides)
