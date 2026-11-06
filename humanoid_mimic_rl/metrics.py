@@ -215,7 +215,13 @@ def is_flip_clip(qpos: np.ndarray, min_rotation_rad: float = np.pi) -> bool:
 
 
 def summarize_tracking(
-    reward: np.ndarray, done: np.ndarray, qpos: np.ndarray, ref_qpos: np.ndarray, ctrl_dt_s: float
+    reward: np.ndarray,
+    done: np.ndarray,
+    qpos: np.ndarray,
+    ref_qpos: np.ndarray,
+    ctrl_dt_s: float,
+    fell: np.ndarray | None = None,
+    tracking_failed: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Reference-tracking metrics over the alive part of each episode.
 
@@ -223,15 +229,31 @@ def summarize_tracking(
     averaged over alive steps per episode, then over episodes:
     root position error (m), root orientation error (geodesic, rad), joint RMSE
     (rad), survival time (s) and the fraction of episodes that never terminated.
+
+    ``done`` of a mimic env is also set when the clip (plus hold) ends, so
+    ``terminated_early_rate`` counts finishing as termination. When the per-step
+    ``fell`` / ``tracking_failed`` flags (``(N, T)``) are given, the causes are
+    read at each episode's first terminal step and reported as mutually
+    exclusive rates: ``fall_rate`` (trunk/head hit the floor),
+    ``tracking_fail_rate`` (tracking termination, no fall) and
+    ``completion_rate`` = 1 - both, i.e. reached the end of the episode
+    without failing. Without the flags ``completion_rate`` falls back to
+    ``1 - terminated_early_rate``.
     """
     mask = alive_mask(done)
     pos_err = np.linalg.norm(qpos[..., 0:3] - ref_qpos[..., 0:3], axis=-1)
     ang_err = quat.quat_angle_between(qpos[..., 3:7], ref_qpos[..., 3:7], np)
     joint_rmse = np.sqrt(np.mean(np.square(qpos[..., 7:] - ref_qpos[..., 7:]), axis=-1))
     out = summarize_common(reward, done, ctrl_dt_s)
+    completion = ~terminated_early(done)
+    if fell is not None and tracking_failed is not None:
+        fell_end = _final(fell.astype(bool), done) & terminated_early(done)
+        failed_end = _final(tracking_failed.astype(bool), done) & terminated_early(done) & ~fell_end
+        completion = ~(fell_end | failed_end)
+        out.update(fall_rate=float(np.mean(fell_end)), tracking_fail_rate=float(np.mean(failed_end)))
     out.update(
         survival_time_s_mean=float(np.mean(episode_lengths(done)) * ctrl_dt_s),
-        completion_rate=float(np.mean(~terminated_early(done))),
+        completion_rate=float(np.mean(completion)),
         root_pos_error_m=float(np.nanmean(_masked_mean(pos_err, mask))),
         root_orientation_error_rad=float(np.nanmean(_masked_mean(ang_err, mask))),
         joint_rmse_rad=float(np.nanmean(_masked_mean(joint_rmse, mask))),

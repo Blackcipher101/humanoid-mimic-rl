@@ -21,6 +21,16 @@ G1_REFERENCE_PATH = REPO_ROOT / "data" / "generated" / "g1_backflip.npz"
 CONTACTS_PER_WORLD = 32
 
 
+def mimic_overrides(eval_mode: bool, termination: str | None) -> dict[str, object]:
+    """Config overrides shared by the mimic tasks (``mimic`` and ``g1_mimic``)."""
+    out: dict[str, object] = {}
+    if eval_mode:
+        out["rsi_start_prob"] = 1.0  # always start at t = 0
+    if termination is not None:
+        out["termination"] = termination
+    return out
+
+
 def make_env(
     task: str,
     impl: str,
@@ -29,6 +39,7 @@ def make_env(
     eval_mode: bool = False,
     hold_final_s: float | None = None,
     torque_scale: float | None = None,
+    termination: str | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -44,8 +55,12 @@ def make_env(
         motions such as walking, where an abrupt stop is not wanted).
       torque_scale: G1 flip tasks only: multiplier on the published peak torques.
         Default and required value: the one recorded in ``<clip>.report.json``.
+      termination: mimic tasks only: ``"root_pose"`` or ``"height_tilt"``
+        (default: the env config's ``"root_pose"``); see ``envs.mimic``.
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
-        is measured undisturbed. Observation noise is kept in all tasks.
+        is measured undisturbed. For ``mimic`` / ``g1_mimic``, every episode
+        starts at clip time 0 (``rsi_start_prob=1``) so the whole clip is scored.
+        Observation noise is kept in all tasks.
     """
     if impl not in ("jax", "warp"):
         raise ValueError(f"impl must be 'jax' or 'warp', got {impl!r}")
@@ -71,6 +86,7 @@ def make_env(
         hold = cfg.hold_final_s if hold_final_s is None else float(hold_final_s)
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
+        overrides.update(mimic_overrides(eval_mode, termination))
         return mimic.T1Mimic(cfg, overrides)
     if task in ("g1_backflip", "g1_mimic"):
         path = (reference_path or G1_REFERENCE_PATH).resolve()
@@ -83,6 +99,7 @@ def make_env(
         overrides["reference_path"] = str(path)
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
+        overrides.update(mimic_overrides(eval_mode, termination))
         return g1_flip.G1Mimic(cfg, overrides)
     raise ValueError(f"unknown task {task!r}")
 

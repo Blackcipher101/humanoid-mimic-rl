@@ -252,6 +252,31 @@ def tracking_failed(
     return (pos_err > max_pos_err_m) | (ang_err > max_angle_err_rad)
 
 
+def height_tilt_failed(
+    root_pos_m: Array,
+    ref_root_pos_m: Array,
+    root_quat: Array,
+    ref_root_quat: Array,
+    max_height_err_m: float,
+    max_tilt_err: float,
+    xp: ModuleType,
+) -> Array:
+    """SuperMimic (App. A) termination: root height error or tilt error too large.
+
+    Root xy position and yaw are deliberately ignored (the actor cannot observe
+    them). ``tilt_err = |g_z - g_z_ref|`` where ``g_z`` is the z component of the
+    world up direction expressed in the body frame (1 upright, -1 inverted; the
+    gravity direction's z component is its negative, so the difference is the
+    same). Quaternions are (w, x, y, z). ``tilt_err`` lies in [0, 2]; for a pure
+    tilt from an upright reference it equals ``1 - cos(tilt)``.
+    """
+    z_axis = xp.asarray([0.0, 0.0, 1.0])
+    up_z = quat.quat_rotate(quat.quat_conj(root_quat, xp), z_axis, xp)[..., 2]
+    ref_up_z = quat.quat_rotate(quat.quat_conj(ref_root_quat, xp), z_axis, xp)[..., 2]
+    height_err = xp.abs(root_pos_m[..., 2] - ref_root_pos_m[..., 2])
+    return (height_err > max_height_err_m) | (xp.abs(up_z - ref_up_z) > max_tilt_err)
+
+
 # ---------------------------------------------------------------------------
 # Action mapping.
 # ---------------------------------------------------------------------------

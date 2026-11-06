@@ -149,3 +149,34 @@ def test_home_range_targets():
     np.testing.assert_allclose(rewards.home_range_targets(np.array([0.5, -0.5]), home, lo, hi, np),
                                [0.4 + 0.5 * 1.94, -0.2 - 0.5 * 0.67])
     np.testing.assert_allclose(rewards.home_range_targets(np.array([3.0, -3.0]), home, lo, hi, np), [2.34, -0.87])
+
+
+def test_height_tilt_failed_ignores_xy_and_yaw_but_not_height_or_tilt():
+    Z = np.array([0.0, 0.0, 1.0])
+    rq = quat.quat_from_axis_angle(Y, 0.0, np)
+    p = np.array([0.0, 0.0, 0.7])
+
+    def failed(pos, q):
+        return bool(rewards.height_tilt_failed(pos, p, q, rq, 0.25, 0.8, np))
+
+    assert not failed(p, rq)
+    assert not failed(p + np.array([1.0, 1.0, 0.0]), rq)  # 1.4 m xy drift
+    assert not failed(p, quat.quat_from_axis_angle(Z, np.pi / 2, np))  # 90 deg yaw
+    assert not failed(p + np.array([0.0, 0.0, 0.2]), rq)
+    assert failed(p + np.array([0.0, 0.0, 0.3]), rq)
+    assert failed(p - np.array([0.0, 0.0, 0.3]), rq)
+    assert not failed(p, quat.quat_from_axis_angle(Y, np.deg2rad(70.0), np))  # 1 - cos(70) = 0.66
+    assert failed(p, quat.quat_from_axis_angle(Y, np.deg2rad(85.0), np))  # 1 - cos(85) = 0.91
+    assert failed(p, quat.quat_from_axis_angle(np.array([1.0, 0.0, 0.0]), np.deg2rad(-85.0), np))
+
+
+def test_height_tilt_failed_measures_tilt_relative_to_reference_and_batches():
+    ref_q = quat.quat_from_axis_angle(Y, np.deg2rad(60.0), np)  # reference itself leaning
+    p = np.array([0.0, 0.0, 0.7])
+    assert not rewards.height_tilt_failed(p, p, ref_q, ref_q, 0.25, 0.8, np)
+    qs = np.stack([ref_q, quat.quat_from_axis_angle(Y, 0.0, np)])
+    ps = np.stack([p, p])
+    out = rewards.height_tilt_failed(ps, ps, qs, np.stack([ref_q, ref_q]), 0.25, 0.8, np)
+    np.testing.assert_array_equal(out, [False, False])  # |cos60 - cos0| = 0.5
+    out = rewards.height_tilt_failed(ps, ps, qs, np.stack([ref_q, quat.quat_from_axis_angle(Y, np.pi, np)]), 0.25, 0.8, np)
+    np.testing.assert_array_equal(out, [False, True])
