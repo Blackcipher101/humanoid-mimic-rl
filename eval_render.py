@@ -17,6 +17,7 @@ Metrics (see ``humanoid_mimic_rl/metrics.py`` for exact definitions):
              for a fixed command (``--walk-command``), pushes disabled
   getup:     success rate (standing for the final 1 s), stood-up rate, fall rate, time to stand
   backflip/mimic: max backward rotation (rad), full-rotation rate, landing success rate, fall rate
+  routine (g1_mimic with the routine reward): flip_rate, kick_rate, routine_success_rate
 """
 
 from __future__ import annotations
@@ -202,6 +203,9 @@ def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, ja
             if "fell" in state.metrics:
                 out["fell"] = state.metrics["fell"]
                 out["tracking_failed"] = state.metrics["tracking_failed"]
+            for k in metrics.ROUTINE_FLAGS:
+                if k in state.metrics:
+                    out[k] = state.metrics[k]
         if task == "getup":
             out["standing"] = state.metrics["standing"]
         return out
@@ -253,6 +257,8 @@ def summarize(
         out = metrics.summarize_tracking(tr["reward"], tr["done"], tr["qpos"],
                                          reference.sample_qpos_batch(clip, tr["time"]), dt,
                                          tr["fell"], tr["tracking_failed"])
+        if all(k in tr for k in metrics.ROUTINE_FLAGS):
+            out.update(metrics.summarize_routine(tr["done"], *(tr[k] for k in metrics.ROUTINE_FLAGS)))
         if not metrics.is_flip_clip(clip.qpos):
             return out
         flip = metrics.summarize_flip(
@@ -292,7 +298,10 @@ def main() -> None:
     env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True,
                          hold_final_s=hold, torque_scale=run_cfg["env_config"].get("torque_scale"),
                          termination=run_cfg["env_config"].get("termination"),
-                         allow_infeasible_clip=bool(run_cfg.get("allow_infeasible_clip", False)))
+                         allow_infeasible_clip=bool(run_cfg.get("allow_infeasible_clip", False)),
+                         routine=bool(run_cfg.get("routine")),
+                         routine_options={k: v for k, v in (run_cfg.get("routine") or {}).items()
+                                          if k in tasks.ROUTINE_OPTIONS})
     model_label = getattr(env.unwrapped, "model_label", None)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)

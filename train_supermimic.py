@@ -59,6 +59,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--termination", default=None, choices=("root_pose", "height_tilt"),
                    help="mimic tasks: root_pose (default: 3D root drift / full orientation) or height_tilt "
                         "(SuperMimic App. A: root height and tilt error only)")
+    p.add_argument("--routine", action=argparse.BooleanOptionalAction, default=None,
+                   help="g1_mimic: routine reward: dense tracking + per-milestone bonuses (flip -> kick -> stand, "
+                        "humanoid_mimic_rl.routine). Default: on iff the clip report has a 'routine' section")
+    p.add_argument("--routine-flip-bonus", type=float, default=None,
+                   help="routine reward: flip bonus as a fraction of a perfect-tracking episode return (default 0.1)")
+    p.add_argument("--routine-kick-bonus", type=float, default=None, help="kick bonus fraction (default 0.1)")
+    p.add_argument("--routine-stand-bonus", type=float, default=None, help="stand-at-end bonus fraction (default 0.1)")
+    p.add_argument("--routine-gated", action="store_true",
+                   help="routine reward: also multiply the dense reward after a missed milestone window by 0 (off)")
     return p.parse_args()
 
 
@@ -95,12 +104,16 @@ def main() -> None:
 
     env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
-                         allow_infeasible_clip=args.allow_infeasible_clip)
+                         allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
+                         routine_options=tasks.routine_options_from_args(args))
     eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
-                         allow_infeasible_clip=args.allow_infeasible_clip, eval_mode=True)
+                         allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
+                         routine_options=tasks.routine_options_from_args(args),
+                         eval_mode=True)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
+    routine_cfg = tasks.routine_run_config(env)
     run_config = {
         "task": task,
         "algo": "supermimic",
@@ -112,6 +125,7 @@ def main() -> None:
         "env_config": env.unwrapped._config.to_dict(),  # pylint: disable=protected-access
         "model_label": getattr(env.unwrapped, "model_label", None),
         "allow_infeasible_clip": args.allow_infeasible_clip,
+        "routine": routine_cfg,
         "versions": _versions(),
         "devices": [str(d) for d in jax.devices()],
     }
@@ -171,13 +185,18 @@ def main() -> None:
             if "landing_success_rate" in ev
             else ""
         )
+        routine_m = (
+            f"flip={ev['flip_rate']:.2f} kick={ev['kick_rate']:.2f} routine={ev['routine_success_rate']:.2f} "
+            if "routine_success_rate" in ev
+            else ""
+        )
         print(
             f"[eval] it {it:,}/{cfg.num_iterations:,} ({100.0 * it / cfg.num_iterations:5.1f}%) "
             f"return={ev['episode_return_mean']:.3f} survival={ev['survival_time_s_mean']:.2f}s "
             f"complete={ev['completion_rate']:.2f} fall={ev['fall_rate']:.2f} "
             f"track_fail={ev['tracking_fail_rate']:.2f} root_err={ev['root_pos_error_m']:.3f}m "
             f"ori_err={ev['root_orientation_error_rad']:.3f}rad joint_rmse={ev['joint_rmse_rad']:.3f}rad "
-            f"{task_m}| wm_loss={train_m['wm/loss']:.4f} "
+            f"{task_m}{routine_m}| wm_loss={train_m['wm/loss']:.4f} "
             f"J_img={train_m['policy/imagined_return']:.3e} v_loss={train_m['critic/loss']:.2e} "
             f"v_expl_var={train_m['critic/explained_variance']:.2f} "
             f"collect_ret={train_m['collect/episode_return']:.3f} | "

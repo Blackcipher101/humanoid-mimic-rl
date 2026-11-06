@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from mujoco_playground import registry
@@ -31,6 +32,56 @@ def mimic_overrides(eval_mode: bool, termination: str | None) -> dict[str, objec
     return out
 
 
+ROUTINE_OPTIONS = ("flip_bonus_fraction", "kick_bonus_fraction", "stand_bonus_fraction", "gated")
+
+
+def routine_options_from_args(args: object) -> dict[str, object]:
+    """``routine_options`` for ``make_env`` from the ``--routine-*`` CLI flags (unset flags are omitted)."""
+    out = {
+        "flip_bonus_fraction": getattr(args, "routine_flip_bonus", None),
+        "kick_bonus_fraction": getattr(args, "routine_kick_bonus", None),
+        "stand_bonus_fraction": getattr(args, "routine_stand_bonus", None),
+        "gated": True if getattr(args, "routine_gated", False) else None,
+    }
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def routine_overrides(
+    clip_path: Path, routine: bool | None, options: dict[str, object] | None
+) -> dict[str, object]:
+    """Config overrides enabling the routine reward (``humanoid_mimic_rl.routine``) for ``clip_path``.
+
+    ``routine=None`` enables it iff the clip's report has a ``routine`` section; ``True`` requires one
+    (``ValueError`` otherwise); ``False`` keeps the plain tracking reward. ``options`` (keys in
+    ``ROUTINE_OPTIONS``: bonus fractions, ``gated``) override the config defaults and need the routine reward
+    to be enabled.
+    """
+    options = options or {}
+    unknown = set(options) - set(ROUTINE_OPTIONS)
+    if unknown:
+        raise ValueError(f"unknown routine options {sorted(unknown)}; known: {ROUTINE_OPTIONS}")
+    report = g1_model.clip_report_path(clip_path)
+    has_section = report.is_file() and "routine" in json.loads(report.read_text(encoding="utf-8"))
+    enabled = has_section if routine is None else routine
+    if enabled and not has_section:
+        raise ValueError(f"--routine needs a clip report with a 'routine' section ({report}); "
+                         "build the clip with scripts/make_g1_routine.py")
+    if not enabled:
+        if options:
+            raise ValueError("routine options given but the routine reward is not enabled")
+        return {}
+    return {"routine.enabled": True, "routine.report_path": str(report),
+            **{f"routine.{k}": v for k, v in options.items()}}
+
+
+def routine_run_config(env: mjx_env.MjxEnv) -> dict[str, object] | None:
+    """``run_config.json`` entry of the routine reward (config plus the resolved terminal bonus), or ``None``."""
+    cfg = env.unwrapped._config.get("routine")  # pylint: disable=protected-access
+    if cfg is None or not cfg.enabled:
+        return None
+    return {**cfg.to_dict(), "bonuses": dict(zip(("flip", "kick", "stand"), env.unwrapped.routine_bonuses))}
+
+
 def make_env(
     task: str,
     impl: str,
@@ -41,6 +92,8 @@ def make_env(
     torque_scale: float | None = None,
     termination: str | None = None,
     allow_infeasible_clip: bool = False,
+    routine: bool | None = None,
+    routine_options: dict[str, object] | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -60,6 +113,8 @@ def make_env(
         (default: the env config's ``"root_pose"``); see ``envs.mimic``.
       allow_infeasible_clip: G1 mimic/flip tasks only: accept a clip whose report FAILED the
         torque feasibility check (see ``g1_model.resolve_torque_scale``).
+      routine, routine_options: ``g1_mimic`` only: multi-stage routine reward, see
+        ``routine_overrides`` and ``humanoid_mimic_rl.routine``.
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. For ``mimic`` / ``g1_mimic``, every episode
         starts at clip time 0 (``rsi_start_prob=1``) so the whole clip is scored.
@@ -81,6 +136,8 @@ def make_env(
         return getup.T1Getup(getup.default_config(), overrides)
     if task == "backflip":
         return backflip.T1Backflip(backflip.default_config(), overrides)
+    if routine and task != "g1_mimic":
+        raise ValueError(f"the routine reward is only available for g1_mimic, not {task!r}")
     if task == "mimic":
         path = (reference_path or DEFAULT_REFERENCE_PATH).resolve()
         cfg = mimic.default_config()
@@ -103,6 +160,7 @@ def make_env(
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
         overrides.update(mimic_overrides(eval_mode, termination))
+        overrides.update(routine_overrides(path, routine, routine_options))
         return g1_flip.G1Mimic(cfg, overrides)
     raise ValueError(f"unknown task {task!r}")
 

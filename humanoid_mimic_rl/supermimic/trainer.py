@@ -21,7 +21,9 @@ Adaptations to this repository (all documented in the README):
   The paper allows analytic heads; it learns a soft termination probability,
   here termination is a hard indicator with a stop-gradient (rewards are dense);
 * no domain randomisation, so the world model has no sim-context input;
-* reward = the DeepMimic reward of ``MimicTask`` (the paper uses BeyondMimic's);
+* reward = the DeepMimic reward of ``MimicTask`` (the paper uses BeyondMimic's); with the opt-in routine
+  reward (``humanoid_mimic_rl.routine``) imagination adds a differentiable surrogate of the milestone bonuses
+  (``env.routine_soft_step``), the simulator env pays the hard bonuses;
 * return-based reset sampling is replaced by the env's uniform RSI.
 """
 
@@ -187,6 +189,9 @@ class SuperMimicTrainer:
         self._v_step = jax.vmap(env.step)
         self._v_targets = jax.vmap(env.motor_targets)
         self._v_reward = jax.vmap(env.reward_and_termination)
+        if env.routine_enabled:  # imagination-only differentiable surrogate of the milestone bonuses
+            self._v_routine_init = jax.vmap(env.routine_soft_init)
+            self._v_routine_step = jax.vmap(env.routine_soft_step)
 
     # ------------------------------------------------------------------
     # Analytic heads.
@@ -394,7 +399,7 @@ class SuperMimicTrainer:
         v_kin = jax.vmap(self.kinematics)
 
         def body(carry, k_step):
-            qpos, qvel, t, la, lla, alive = carry
+            qpos, qvel, t, la, lla, alive, rstate = carry
             obs = self.actor_obs(qpos, qvel, la, t)
             obs = obs + self.obs_noise * jax.random.uniform(k_step, obs.shape, minval=-1.0, maxval=1.0)
             action = self.policy.apply(pi_params, _norm(obs, ts.obs_stats))
@@ -403,17 +408,23 @@ class SuperMimicTrainer:
             t2 = t + dt
             ee, fall_h = v_kin(qpos2)
             reward, _, flags = self._v_reward(qpos2, qvel2, ee, fall_h, t2, action, la, lla)
+            if self.env.routine_enabled:
+                rstate, extra = self._v_routine_step(rstate, qpos2, ee, t2, flags["finished"], flags["fell"])
+                reward = reward + extra
             done = jax.lax.stop_gradient(flags["done"].astype(jp.float32))
             crit = self.critic_obs(qpos, qvel, la, t)
             out = {"reward": reward, "done": done, "alive": alive, "critic_obs": crit}
-            return (qpos2, qvel2, t2, action, la, alive * (1.0 - done)), out
+            return (qpos2, qvel2, t2, action, la, alive * (1.0 - done), rstate), out
 
         if cfg.remat_imagination:
             body = jax.checkpoint(body)
         b = start["qpos"].shape[0]
-        carry0 = (start["qpos"], start["qvel"], start["time"], start["last_act"], start["last_last_act"], jp.ones(b))
+        rstate0 = self._v_routine_init(start["qpos"], start["time"]) if self.env.routine_enabled else {}
+        carry0 = (
+            start["qpos"], start["qvel"], start["time"], start["last_act"], start["last_last_act"], jp.ones(b), rstate0
+        )
         carry, traj = jax.lax.scan(body, carry0, jax.random.split(key, cfg.horizon))
-        qpos_h, qvel_h, t_h, la_h, _, alive_h = carry
+        qpos_h, qvel_h, t_h, la_h, _, alive_h, _ = carry
         crit_h = self.critic_obs(qpos_h, qvel_h, la_h, t_h)
         return traj, crit_h, alive_h  # traj leaves are (H, B, ...)
 
@@ -538,6 +549,7 @@ class SuperMimicTrainer:
                     "qpos": s.data.qpos,
                     "fell": s.metrics["fell"],
                     "tracking_failed": s.metrics["tracking_failed"],
+                    **{k: s.metrics[k] for k in metrics.ROUTINE_FLAGS if k in s.metrics},
                     "time": s.data.time,
                     "up_z": jax.vmap(eval_env.up_z)(s.data),
                     "feet_contact": jax.vmap(eval_env.feet_contact)(s.data),
@@ -565,7 +577,8 @@ def summarize_eval(
     traj: dict[str, jax.Array], ctrl_dt_s: float, home_height_m: float, clip: reference.ReferenceClip
 ) -> dict[str, float]:
     """Eval metrics from a ``(T, N, ...)`` rollout: tracking metrics for every clip
-    (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip."""
+    (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip and routine rates when the
+    env records the routine milestone flags."""
     tr = {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
     ref = reference.sample_qpos_batch(clip, tr["time"])
     out = metrics.summarize_tracking(
@@ -579,6 +592,8 @@ def summarize_eval(
         # The flip "fall_rate" (not upright at the end, or terminated) is a different quantity.
         flip["flip_fall_rate"] = flip.pop("fall_rate")
         out.update(flip)
+    if all(k in tr for k in metrics.ROUTINE_FLAGS):
+        out.update(metrics.summarize_routine(tr["done"], *(tr[k] for k in metrics.ROUTINE_FLAGS)))
     return out
 
 
