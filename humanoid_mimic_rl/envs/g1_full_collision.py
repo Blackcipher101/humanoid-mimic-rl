@@ -32,9 +32,10 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
     HOME_ROOT_HEIGHT_M = g1_model.G1_HOME_ROOT_HEIGHT_M
     JOINT_NAMES = g1_model.G1_JOINT_NAMES
     END_EFFECTOR_SITES = g1_model.END_EFFECTOR_SITES
-    # Position-servo kp overrides (joint name -> kp) applied to this env's model
-    # only; empty = playground's gains. The flip tasks set g1_model.FLIP_SERVO_KP.
-    SERVO_KP_OVERRIDES: dict[str, float] = {}
+    # False: playground's position servos. True (flip tasks): torque motors limited
+    # to g1_model.flip_peak_torques, driven by a PD-to-torque layer evaluated every
+    # physics substep (see ``physics_step``).
+    TORQUE_MODE: bool = False
 
     def __init__(self, config: config_dict.ConfigDict, config_overrides: dict[str, Any] | None = None) -> None:
         super().__init__(config, config_overrides)
@@ -42,7 +43,14 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
         self._model_assets = assets
         self._mj_model = mujoco.MjModel.from_xml_string(scene_xml, assets=assets)
         self._mj_model.opt.timestep = self.sim_dt
-        g1_model.apply_servo_kp(self._mj_model, self.SERVO_KP_OVERRIDES)
+        if self.TORQUE_MODE:
+            peak = g1_model.flip_peak_torques(self._mj_model)
+            g1_model.to_torque_motors(self._mj_model, peak)
+            kp, kd = g1_model.flip_pd_gains(peak)
+            slack = g1_model.FLIP_PD_TARGET_SLACK_RAD
+            self._pd_kp, self._pd_kd, self._peak_nm = jp.array(kp), jp.array(kd), jp.array(peak)
+            self._target_lo = jp.array(self._mj_model.jnt_range[1:, 0] - slack)
+            self._target_hi = jp.array(self._mj_model.jnt_range[1:, 1] + slack)
         self._mj_model.vis.global_.offwidth = 1920
         self._mj_model.vis.global_.offheight = 1080
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
@@ -108,6 +116,9 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
     # Simulation ---------------------------------------------------------
 
     def make_data(self, qpos: jax.Array, qvel: jax.Array, ctrl: jax.Array) -> mjx.Data:
+        """``ctrl`` are position targets; in torque mode the initial motor torque is 0."""
+        if self.TORQUE_MODE:
+            ctrl = jp.zeros_like(ctrl)
         data = mjx_env.make_data(
             self.mj_model, qpos=qpos, qvel=qvel, ctrl=ctrl, impl=self.mjx_model.impl.value,
             naconmax=self._config.naconmax, njmax=self._config.njmax,
@@ -115,7 +126,24 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
         return mjx.forward(self.mjx_model, data)
 
     def physics_step(self, data: mjx.Data, motor_targets: jax.Array) -> mjx.Data:
-        return mjx_env.step(self.mjx_model, data, motor_targets, self.n_substeps)
+        """Advance one control step towards joint position targets (rad).
+
+        Servo mode: playground's position actuators (targets clamped to ctrlrange).
+        Torque mode: every substep ``tau = clip(kp (target - q) - kd qd, +-peak)``
+        with targets clipped to the joint range +- ``FLIP_PD_TARGET_SLACK_RAD``,
+        so the policy keeps position-like actions while the actuator limit is the
+        real peak torque.
+        """
+        if not self.TORQUE_MODE:
+            return mjx_env.step(self.mjx_model, data, motor_targets, self.n_substeps)
+        target = jp.clip(motor_targets, self._target_lo, self._target_hi)
+
+        def substep(d: mjx.Data, _: None) -> tuple[mjx.Data, None]:
+            tau = self._pd_kp * (target - d.qpos[7:]) - self._pd_kd * d.qvel[6:]
+            tau = jp.clip(tau, -self._peak_nm, self._peak_nm)
+            return mjx.step(self.mjx_model, d.replace(ctrl=tau)), None
+
+        return jax.lax.scan(substep, data, None, self.n_substeps)[0]
 
     # Observations -------------------------------------------------------
 

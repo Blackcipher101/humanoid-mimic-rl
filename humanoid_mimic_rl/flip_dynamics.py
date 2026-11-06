@@ -31,6 +31,7 @@ import numpy as np
 from humanoid_mimic_rl import quat, reference
 
 GRAVITY_MPS2 = 9.81
+COP_TOLERANCE_M = 0.005  # CoP may lie this far outside the touching sole region (numerics)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,6 +68,13 @@ class FloatingBaseModel:
         if np.any(self.force_limit <= 0.0):
             raise ValueError("every actuated joint needs actuatorfrcrange")
         self.kp = model.actuator_gainprm[:, 0].copy()
+        # Position servos (affine bias) are limited by PD authority; torque motors
+        # (no bias) only by their force limit / control range.
+        self.is_servo = model.actuator_biastype == int(mujoco.mjtBias.mjBIAS_AFFINE)
+        is_motor = ~self.is_servo
+        ctrl_abs = np.max(np.abs(model.actuator_ctrlrange), axis=1)
+        self.force_limit = np.where(is_motor & (model.actuator_ctrllimited == 1),
+                                    np.minimum(self.force_limit, ctrl_abs), self.force_limit)
         self.ctrl_lo = model.actuator_ctrlrange[:, 0].copy()
         self.ctrl_hi = model.actuator_ctrlrange[:, 1].copy()
         self.jnt_lo = model.jnt_range[1:, 0].copy()
@@ -74,10 +82,13 @@ class FloatingBaseModel:
 
     # ------------------------------------------------------------------
     def actuator_caps(self, q_joint: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """``(cap_pos, cap_neg)``: max positive / negative torque magnitude at ``q_joint``."""
+        """``(cap_pos, cap_neg)``: max positive / negative torque magnitude at ``q_joint``.
+
+        Servos: ``min(force limit, kp * distance to the control limit)``; motors: force limit.
+        """
         pos = np.minimum(self.force_limit, np.maximum(self.kp * (self.ctrl_hi - q_joint), 0.0))
         neg = np.minimum(self.force_limit, np.maximum(self.kp * (q_joint - self.ctrl_lo), 0.0))
-        return pos, neg
+        return np.where(self.is_servo, pos, self.force_limit), np.where(self.is_servo, neg, self.force_limit)
 
     def kinematics(self, qpos: np.ndarray) -> None:
         self.d.qpos[:] = qpos
@@ -144,10 +155,37 @@ class FloatingBaseModel:
         b = self.foot_ids[foot]
         return (self.d.xpos[b] + self.sole_corners_local @ self.d.xmat[b].reshape(3, 3).T)[:, 2]
 
+    def sole_centre_and_corners(self, foot: int) -> tuple[np.ndarray, np.ndarray]:
+        """World sole centre (3,) and corners (4, 3) of a foot; call after kinematics."""
+        b = self.foot_ids[foot]
+        pos, rot = self.d.xpos[b], self.d.xmat[b].reshape(3, 3)
+        return pos + rot @ self.sole_local, pos + self.sole_corners_local @ rot.T
+
     def body_clearance(self) -> float:
         """Lowest bounding-sphere bottom (m) of the non-foot floor colliders; after kinematics."""
         z = self.d.geom_xpos[self.clear_geom_ids, 2] - self.m.geom_rbound[self.clear_geom_ids]
         return float(np.min(z))
+
+
+def ground_cop(centre: np.ndarray, wrench: np.ndarray) -> np.ndarray:
+    """Centre of pressure (x, y) on the floor plane z = 0 of a wrench ``[F, tau]``
+    given about ``centre`` (world). Requires ``F_z > 0``."""
+    f, tau = wrench[:3], wrench[3:]
+    dx = (-centre[2] * f[0] - tau[1]) / f[2]
+    dy = (tau[0] - centre[2] * f[1]) / f[2]
+    return np.array([centre[0] + dx, centre[1] + dy])
+
+
+def cop_outside_support(cop: np.ndarray, corners: np.ndarray, touch_tol_m: float = 0.005) -> float:
+    """Distance (m) by which ``cop`` lies outside the box spanned by the sole corners
+    touching the floor (height < ``touch_tol_m``); 0 inside. With the heel lifted only
+    the toe corners touch, so the support shrinks to the toe line."""
+    touching = corners[corners[:, 2] < touch_tol_m]
+    if touching.shape[0] == 0:
+        return float("inf")
+    lo, hi = touching[:, :2].min(axis=0), touching[:, :2].max(axis=0)
+    out = np.maximum(lo - cop, 0.0) + np.maximum(cop - hi, 0.0)
+    return float(np.linalg.norm(out))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,8 +201,7 @@ class DynamicsReport:
     body_weight_n: float
     stance_min_normal_force_n: float
     stance_max_friction_ratio: float
-    stance_max_cop_x_frac: float
-    stance_max_cop_y_frac: float
+    stance_max_cop_outside_m: float
     torque_ratio_max: float
     torque_ratio_by_joint: dict[str, float]
     worst_joint: str
@@ -177,8 +214,7 @@ class DynamicsReport:
             and self.flight_root_torque_max_nm <= root_torque_tol_nm
             and self.stance_min_normal_force_n >= 0.0
             and self.stance_max_friction_ratio <= friction
-            and self.stance_max_cop_x_frac <= 1.0
-            and self.stance_max_cop_y_frac <= 1.0
+            and self.stance_max_cop_outside_m <= COP_TOLERANCE_M
             and self.torque_ratio_max <= torque_margin
         )
 
@@ -209,8 +245,7 @@ def check_clip(
     for i in flip:
         changed[max(i - 1, 0) : min(i + 3, n)] = True
     changed[[0, 1, -2, -1]] = True  # one-sided differences at the clip ends
-    feet = fb.feet
-    root_f, root_t, fz_min, fric, copx, copy_ = [0.0], [0.0], [np.inf], [0.0], [0.0], [0.0]
+    root_f, root_t, fz_min, fric, cop_out = [0.0], [0.0], [np.inf], [0.0], [0.0]
     ratio = np.zeros(fb.m.nu)
     for k in range(n):
         if changed[k]:
@@ -222,8 +257,8 @@ def check_clip(
             fz = w[2]
             fz_min.append(fz)
             fric.append(np.hypot(w[0], w[1]) / max(fz, 1e-9))
-            copx.append(abs(-w[4] / max(fz, 1e-9)) / feet.half_length_m)
-            copy_.append(abs(w[3] / max(fz, 1e-9)) / feet.half_width_m)
+            centre, corners = fb.sole_centre_and_corners(0)
+            cop_out.append(cop_outside_support(ground_cop(centre, w), corners) if fz > 0 else float("inf"))
         else:
             tau = f[6:]
             root_f.append(float(np.linalg.norm(f[0:3])))
@@ -242,8 +277,7 @@ def check_clip(
         body_weight_n=fb.mass_kg * GRAVITY_MPS2,
         stance_min_normal_force_n=float(np.min(fz_min)) if len(fz_min) > 1 else float("nan"),
         stance_max_friction_ratio=float(np.max(fric)),
-        stance_max_cop_x_frac=float(np.max(copx)),
-        stance_max_cop_y_frac=float(np.max(copy_)),
+        stance_max_cop_outside_m=float(np.max(cop_out)),
         torque_ratio_max=float(np.max(ratio)),
         torque_ratio_by_joint=by_joint,
         worst_joint=worst,

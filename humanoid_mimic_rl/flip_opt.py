@@ -68,12 +68,21 @@ class FlipSetup:
     takeoff_vx_target_mps: float = -0.5  # stage-A target: modest backward travel
     torque_margin: float = 0.85
     # Cap torques by the position servo's PD authority (kp * distance to the
-    # control limit) as well as the force limit. True matches what the
-    # simulated G1 can actually produce; False uses force limits only.
+    # control limit) as well as the force limit (servo actuators only; torque
+    # motors are capped by their force limit). False uses force limits only.
     use_pd_authority: bool = True
     friction: float = 0.6
     friction_margin: float = 0.8
-    cop_margin: float = 0.8
+    cop_margin: float = 0.8  # flat foot: CoP within this fraction of the sole half-length/-width
+    # Toe-off: before take-off the feet may pivot about the sole's front edge
+    # (heel lift, decision variables heel_max and heel_lead); while the heel is
+    # up the CoP must lie on the toe line, within toe_band_m behind the edge.
+    max_heel_lift_rad: float = 0.6
+    heel_lead_bounds_s: tuple[float, float] = (0.05, 0.25)
+    toe_band_m: float = 0.02
+    # A lower, tighter flip: bounds on root apex rise above home and net travel.
+    max_apex_rise_m: float = 0.5
+    max_travel_m: float = 0.5
     min_normal_force_frac: float = 0.05  # of body weight, per foot
     # Touch-down is allowed to be a small impact (the stance after it starts
     # from the flight state; the residual velocity jump is reported).
@@ -96,7 +105,7 @@ class FlipSetup:
 
     @property
     def num_params(self) -> int:
-        return len(self.free_knots) * len(self.groups) + 1
+        return len(self.free_knots) * len(self.groups) + 3  # + heel_max, heel_lead, takeoff
 
 
 @dataclasses.dataclass
@@ -111,9 +120,11 @@ class Rollout:
     takeoff_s: float
     landing_s: float
     landed: bool
+    heel_angle: np.ndarray  # (T,) foot pitch about the toe edge (rad), 0 = flat
     tau: np.ndarray  # (T, nu) actuator torques
     torque_ratio: np.ndarray  # (T, nu) |tau| / cap (direction-dependent cap)
     foot_wrench: np.ndarray  # (T, 6) per-foot wrench in stance, NaN in flight
+    cop_inside: np.ndarray  # (T, 2) bilinear CoP margin F_z * inside-distance (body weights * m), x and y
     clearance: np.ndarray  # (T,) min clearance minus margin in flight, +inf elsewhere
     takeoff_com_vel: np.ndarray  # (3,)
     takeoff_ang_mom: np.ndarray  # (3,) about the CoM, world frame
@@ -127,9 +138,12 @@ class FlipProblem:
         self.s = setup
         fb.kinematics(setup.home_qpos)
         b = fb.foot_ids[0]
-        self.anchor0 = fb.d.xpos[b].copy()
+        self.anchor0 = fb.d.xpos[b].copy()  # left foot origin at home (sets the floor height)
         if abs(fd.pitch_of(fb.d.xmat[b].reshape(3, 3))) > 1e-3:
             raise ValueError("home pose must have flat feet")
+        sx, sy, sz = fb.feet.sole_centre_local_m
+        self.toe_local = np.array([sx + fb.feet.half_length_m, sy, sz])  # front edge of the sole
+        self.toe0 = self.anchor0 + fb.d.xmat[b].reshape(3, 3) @ self.toe_local
         self.n_group = len(setup.groups)
 
     # ------------------------------------------------------------------
@@ -142,11 +156,21 @@ class FlipProblem:
     def knot_matrix(self, x: np.ndarray) -> np.ndarray:
         s = self.s
         k = np.tile(self.group_home(), (len(s.knot_times_s), 1))
-        k[s.free_knots] = x[:-1].reshape(len(s.free_knots), self.n_group)
+        k[s.free_knots] = x[:-3].reshape(len(s.free_knots), self.n_group)
         return k
 
-    def pack(self, free_knot_values: np.ndarray, takeoff_s: float) -> np.ndarray:
-        return np.concatenate([np.asarray(free_knot_values, dtype=np.float64).reshape(-1), [takeoff_s]])
+    def pack(self, free_knot_values: np.ndarray, takeoff_s: float, heel_max_rad: float = 0.0,
+             heel_lead_s: float = 0.1) -> np.ndarray:
+        """``x = [free knot values, heel_max, heel_lead, takeoff]``."""
+        return np.concatenate(
+            [np.asarray(free_knot_values, dtype=np.float64).reshape(-1), [heel_max_rad, heel_lead_s, takeoff_s]]
+        )
+
+    def heel_angle(self, x: np.ndarray, t: float) -> float:
+        """Heel lift (rad) before take-off: smoothstep from 0 to heel_max over heel_lead."""
+        heel_max, lead, t_to = float(x[-3]), float(x[-2]), float(x[-1])
+        u = np.clip((t - (t_to - lead)) / lead, 0.0, 1.0)
+        return heel_max * u * u * (3.0 - 2.0 * u)
 
     def bounds(self) -> tuple[np.ndarray, np.ndarray]:
         fb, lo, hi = self.fb, [], []
@@ -154,7 +178,10 @@ class FlipProblem:
             for idx in self.s.groups.values():
                 lo.append(fb.jnt_lo[idx[0]] + 0.05)
                 hi.append(fb.jnt_hi[idx[0]] - 0.05)
-        return np.array(lo + [self.s.takeoff_bounds_s[0]]), np.array(hi + [self.s.takeoff_bounds_s[1]])
+        s = self.s
+        lo += [0.0, s.heel_lead_bounds_s[0], s.takeoff_bounds_s[0]]
+        hi += [s.max_heel_lift_rad, s.heel_lead_bounds_s[1], s.takeoff_bounds_s[1]]
+        return np.array(lo), np.array(hi)
 
     def knot_param_index(self, knot: int, group: str) -> int:
         """Index in ``x`` of the value of ``group`` at knot ``knot`` (must be free)."""
@@ -182,19 +209,23 @@ class FlipProblem:
     # Root motion.
     # ------------------------------------------------------------------
 
-    def stance_root(self, q_joint: np.ndarray, anchor: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Root position and quaternion with the left foot flat at ``anchor`` (yaw 0)."""
+    def stance_root(self, q_joint: np.ndarray, toe_anchor: np.ndarray, heel_rad: float = 0.0):
+        """Root position and quaternion with the left foot's toe edge at ``toe_anchor`` and the
+        foot pitched by ``heel_rad`` about it (0 = flat, > 0 = heel up), yaw 0."""
         q = np.concatenate([np.zeros(3), [1.0, 0.0, 0.0, 0.0], q_joint])
         p_f, r_f = self.fb.foot_pose(q, 0)
-        r_b = r_f.T
-        return anchor - r_b @ p_f, fd.mat_to_quat(r_b)
+        c, sn = np.cos(heel_rad), np.sin(heel_rad)
+        r_w = np.array([[c, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, c]])  # world foot orientation
+        r_b = r_w @ r_f.T
+        return toe_anchor - r_b @ (p_f + r_f @ self.toe_local), fd.mat_to_quat(r_b)
 
-    def stance_state(self, spl: CubicSpline, t: float, anchor: np.ndarray):
+    def stance_state(self, spl: CubicSpline, t: float, toe_anchor: np.ndarray,
+                     heel: Callable[[float], float] = lambda _t: 0.0):
         e = self.s.fd_eps_s
         qj, qdj, qddj = self.joints_at(spl, t)
-        p0, q0 = self.stance_root(qj, anchor)
-        pm, qm = self.stance_root(self.joints_at(spl, t - e)[0], anchor)
-        pp, qp = self.stance_root(self.joints_at(spl, t + e)[0], anchor)
+        p0, q0 = self.stance_root(qj, toe_anchor, heel(t))
+        pm, qm = self.stance_root(self.joints_at(spl, t - e)[0], toe_anchor, heel(t - e))
+        pp, qp = self.stance_root(self.joints_at(spl, t + e)[0], toe_anchor, heel(t + e))
         qm = qm if np.dot(qm, q0) >= 0 else -qm
         qp = qp if np.dot(qp, q0) >= 0 else -qp
         w, alpha = fd.body_rates(qm, q0, qp, e)
@@ -262,7 +293,8 @@ class FlipProblem:
         s, fb = self.s, self.fb
         spl = self.joint_spline(x)
         t_to = float(x[-1])
-        qp0, qv0, _ = self.stance_state(spl, t_to, self.anchor0)
+        heel = lambda t: self.heel_angle(x, t)  # noqa: E731
+        qp0, qv0, _ = self.stance_state(spl, t_to, self.toe0, heel)
         com_vel, ang_mom = self._momentum(qp0, qv0)
         end = t_to if takeoff_only else s.duration_s
         times = np.arange(int(np.floor(end * s.sample_rate_hz + 1e-9)) + 1) / s.sample_rate_hz
@@ -277,7 +309,7 @@ class FlipProblem:
         n, nq, nv = len(times), fb.m.nq, fb.m.nv
         qpos, qvel, qacc = np.zeros((n, nq)), np.zeros((n, nv)), np.zeros((n, nv))
         for k in np.flatnonzero(times <= t_to):
-            qpos[k], qvel[k], qacc[k] = self.stance_state(spl, times[k], self.anchor0)
+            qpos[k], qvel[k], qacc[k] = self.stance_state(spl, times[k], self.toe0, heel)
 
         td_pitch, td_vel = np.nan, np.full(3, np.nan)
         if not takeoff_only:
@@ -295,7 +327,9 @@ class FlipProblem:
             td_vel = np.array([vel6[3], vel6[5], vel6[1]])
             td_pitch = self._unwrapped_foot_pitch(fy, qpos_ld)
             fb.kinematics(qpos_ld)
-            anchor1 = np.array([fb.d.xpos[fb.foot_ids[0], 0], self.anchor0[1], self.anchor0[2]])
+            b = fb.foot_ids[0]
+            toe_x = (fb.d.xpos[b] + fb.d.xmat[b].reshape(3, 3) @ self.toe_local)[0]
+            anchor1 = np.array([toe_x, self.toe0[1], self.toe0[2]])
             for k in np.flatnonzero(times >= t_ld):
                 qpos[k], qvel[k], qacc[k] = self.stance_state(spl, times[k], anchor1)
         for k in range(1, n):  # keep the root quaternion sign continuous
@@ -305,11 +339,14 @@ class FlipProblem:
         nu = fb.m.nu
         tau, ratio = np.zeros((n, nu)), np.zeros((n, nu))
         wrench = np.full((n, 6), np.nan)
+        cop_inside = np.full((n, 2), np.inf)
+        heel_arr = np.array([heel(t) if t <= t_to else 0.0 for t in times])
         clearance = np.full(n, np.inf)
         for k in range(n):
             f = fb.inverse(qpos[k], qvel[k], qacc[k])
             if contact[k]:
                 wrench[k], tau[k] = fb.foot_wrench(f)
+                cop_inside[k] = self._cop_inside(wrench[k], heel_arr[k] > 0.01)
             else:
                 tau[k] = f[6:]
                 if t_to + s.event_guard_s < times[k] < t_ld - s.event_guard_s:
@@ -322,9 +359,34 @@ class FlipProblem:
             # Caps floored at 1 N m: at a joint limit the PD authority is 0 and the ratio would explode.
             ratio[k] = np.abs(tau[k]) / np.maximum(np.where(tau[k] >= 0, cap_pos, cap_neg), 1.0)
         return Rollout(
-            times, qpos, qvel, qacc, contact, t_to, t_ld, landed, tau, ratio, wrench, clearance,
-            com_vel, ang_mom, float(td_pitch), td_vel,
+            times_s=times, qpos=qpos, qvel=qvel, qacc=qacc, contact=contact, takeoff_s=t_to, landing_s=t_ld,
+            landed=landed, heel_angle=heel_arr, tau=tau, torque_ratio=ratio, foot_wrench=wrench,
+            cop_inside=cop_inside, clearance=clearance, takeoff_com_vel=com_vel, takeoff_ang_mom=ang_mom,
+            touchdown_foot_pitch=float(td_pitch), touchdown_foot_vel=td_vel,
         )
+
+    def _cop_inside(self, wrench: np.ndarray, heel_up: bool) -> np.ndarray:
+        """Bilinear CoP margin (x, y) in body-weight metres: ``F_z x (signed distance of the
+        floor CoP inside the allowed region)``, computed without dividing by ``F_z``
+        so it stays bounded as the normal force vanishes (> 0 iff the CoP is inside).
+
+        Flat foot: ``cop_margin`` x the sole half-length/-width around the sole centre.
+        Heel up: a band ``toe_band_m`` deep behind the toe edge. Call after ``inverse``.
+        """
+        s, fb = self.s, self.fb
+        w = wrench / (fb.mass_kg * fd.GRAVITY_MPS2)
+        fz = w[2]
+        centre, corners = fb.sole_centre_and_corners(0)
+        dx_fz = -centre[2] * w[0] - w[4]  # (cop_x - centre_x) * F_z
+        dy_fz = w[3] - centre[2] * w[1]  # (cop_y - centre_y) * F_z
+        if heel_up:
+            toe_x = float(np.max(corners[:, 0]))
+            rel = dx_fz - (toe_x - centre[0]) * fz  # (cop_x - toe_x) * F_z
+            in_x = min(rel + s.toe_band_m * fz, -rel)
+        else:
+            in_x = s.cop_margin * fb.feet.half_length_m * fz - abs(dx_fz)
+        in_y = s.cop_margin * fb.feet.half_width_m * fz - abs(dy_fz)
+        return np.array([in_x, in_y])
 
     def _momentum(self, qpos: np.ndarray, qvel: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Whole-body CoM velocity and angular momentum about the CoM (world frame)."""
@@ -374,8 +436,8 @@ class FlipProblem:
             "ineq_torque": ((s.torque_margin if torque_margin is None else torque_margin) - r.torque_ratio).ravel(),
             "ineq_normal": (fz - s.min_normal_force_frac / 2) * 10.0,
             "ineq_friction": (mu * fz - np.hypot(w[:, 0], w[:, 1])) * 10.0,
-            "ineq_cop_x": (s.cop_margin * fz - np.abs(w[:, 4]) / fb.feet.half_length_m) * 10.0,
-            "ineq_cop_y": (s.cop_margin * fz - np.abs(w[:, 3]) / fb.feet.half_width_m) * 10.0,
+            "ineq_cop_x": r.cop_inside[r.contact, 0] / 0.005,  # 0.5 cm at one body weight
+            "ineq_cop_y": r.cop_inside[r.contact, 1] / 0.005,
             "ineq_joint_lo": ((r.qpos[:, 7:] - fb.jnt_lo - s.joint_limit_margin_rad) * 10.0).ravel(),
             "ineq_joint_hi": ((fb.jnt_hi - r.qpos[:, 7:] - s.joint_limit_margin_rad) * 10.0).ravel(),
         }
@@ -392,6 +454,10 @@ class FlipProblem:
             )
             out["eq_landing_pitch"] = np.array([(r.touchdown_foot_pitch + TWO_PI) / 0.05])
             out["ineq_landed"] = np.array([1.0 if r.landed else -10.0])
+            rise = float(np.max(r.qpos[:, 2]) - self.s.home_qpos[2])
+            travel = float(abs(r.qpos[-1, 0] - r.qpos[0, 0]))
+            out["ineq_apex"] = np.array([(s.max_apex_rise_m - rise) / 0.05])
+            out["ineq_travel"] = np.array([(s.max_travel_m - travel) / 0.05])
         return out
 
     def violations(self, r: Rollout) -> dict[str, float]:
