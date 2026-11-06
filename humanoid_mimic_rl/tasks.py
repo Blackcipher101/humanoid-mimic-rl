@@ -27,6 +27,7 @@ def make_env(
     num_worlds: int,
     reference_path: Path | None = None,
     eval_mode: bool = False,
+    hold_final_s: float | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -37,6 +38,9 @@ def make_env(
         vmapped over (sizes the warp contact buffer).
       reference_path: clip for ``mimic`` (default ``DEFAULT_REFERENCE_PATH``) or for
         ``g1_backflip`` / ``g1_mimic`` (default ``G1_REFERENCE_PATH``).
+      hold_final_s: mimic tasks only: seconds the reference holds its last frame
+        after the clip ends (default: the env config's 0.6 s; use 0 for cyclic
+        motions such as walking, where an abrupt stop is not wanted).
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. Observation noise is kept in all tasks.
     """
@@ -61,7 +65,9 @@ def make_env(
         cfg = mimic.default_config()
         clip = reference.load_clip(path)
         overrides["reference_path"] = str(path)
-        overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, cfg.hold_final_s)
+        hold = cfg.hold_final_s if hold_final_s is None else float(hold_final_s)
+        overrides["hold_final_s"] = hold
+        overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
         return mimic.T1Mimic(cfg, overrides)
     if task in ("g1_backflip", "g1_mimic"):
         path = (reference_path or G1_REFERENCE_PATH).resolve()
@@ -70,7 +76,9 @@ def make_env(
         cfg = mimic.default_config()
         clip = reference.load_clip(path)
         overrides["reference_path"] = str(path)
-        overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, cfg.hold_final_s)
+        hold = cfg.hold_final_s if hold_final_s is None else float(hold_final_s)
+        overrides["hold_final_s"] = hold
+        overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
         return g1_flip.G1Mimic(cfg, overrides)
     raise ValueError(f"unknown task {task!r}")
 
