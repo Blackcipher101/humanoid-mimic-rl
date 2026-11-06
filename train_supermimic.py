@@ -42,9 +42,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--profile", default="full", choices=("smoke", "full"))
     p.add_argument("--impl", default="jax", choices=("jax", "warp"), help="MJX backend of the simulator env")
     p.add_argument("--iterations", type=int, default=None, help="override the profile's iteration count")
+    p.add_argument("--num-envs", type=int, default=None, help="override simulator envs (GPU memory lever)")
+    p.add_argument("--policy-batch-size", type=int, default=None,
+                   help="override imagined rollouts per policy update (GPU memory lever)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--logdir", type=Path, default=REPO_ROOT / "runs")
-    p.add_argument("--reference", type=Path, default=None)
+    p.add_argument("--reference", "--clip", dest="reference", type=Path, default=None,
+                   help="reference clip (.npz)")
+    p.add_argument("--hold-final-s", type=float, default=None,
+                   help="hold the last frame this long after the clip (default 0.6 s; 0 for walking)")
     return p.parse_args()
 
 
@@ -67,6 +73,10 @@ def main() -> None:
     cfg = sm_config.smoke_config() if args.profile == "smoke" else sm_config.full_config()
     if args.iterations is not None:
         cfg = dataclasses.replace(cfg, num_iterations=args.iterations, eval_every=min(cfg.eval_every, args.iterations))
+    if args.num_envs is not None:
+        cfg = dataclasses.replace(cfg, num_envs=args.num_envs)
+    if args.policy_batch_size is not None:
+        cfg = dataclasses.replace(cfg, policy_batch_size=args.policy_batch_size)
     cfg.validate()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -75,8 +85,8 @@ def main() -> None:
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
-    env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference)
-    eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference)
+    env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s)
+    eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
     run_config = {

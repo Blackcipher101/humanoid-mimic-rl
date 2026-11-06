@@ -125,6 +125,22 @@ Adaptations (single clip, single 16 GB GPU):
   computes sensors before integration); the imagined observation does not.
   The self-check prints the size of this lag; observation noise is larger.
 
+### T1 walk clip from the trained walk policy (`scripts/make_walk_clip.py`)
+This is the fast path to a feasible reference for `mimic` / SuperMimic. The
+trained T1 walk policy is rolled out in playground's walk env (pushes off,
+fixed 0.5 m/s command). The most upright episode that never terminated is
+kept, and an 8 s steady window after 3 s of warm-up is stored.
+
+* The clip holds the simulated `qpos`/`qvel` at 50 Hz, so it is physically
+  feasible by construction.
+* It is rotated to start at the origin heading +x.
+* End-effector sites and foot-contact flags come from MuJoCo FK on the
+  full-collision T1 used by `T1Mimic`, which has the same bodies and inertias.
+* The script prints an approximate inverse-dynamics sanity check
+  (`<clip>.report.json`).
+* Train on it with `--clip data/generated/t1_walk_from_policy.npz
+  --hold-final-s 0`. The 0 hold avoids a reference that stops dead after the clip.
+
 ### G1 backflip: dynamically consistent reference (`scripts/make_g1_backflip.py`)
 The T1 flip failed because its keyframed clip was not physically possible.
 Inverse dynamics of that clip needed up to 3.7 kN of root force in flight and

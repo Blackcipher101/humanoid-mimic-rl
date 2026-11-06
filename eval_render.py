@@ -246,7 +246,9 @@ def main() -> None:
     out_dir = args.out_dir or args.run_dir / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True)
+    hold = run_cfg["env_config"].get("hold_final_s")
+    env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True,
+                         hold_final_s=hold)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)
     print(f"task={task} algo={algo} checkpoint={ckpt} episodes={args.num_episodes} steps={steps}", flush=True)

@@ -51,7 +51,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-timesteps", type=int, default=None, help="override the profile's env-step budget")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--logdir", type=Path, default=REPO_ROOT / "runs")
-    p.add_argument("--reference", type=Path, default=None, help="clip for --task mimic")
+    p.add_argument("--reference", "--clip", dest="reference", type=Path, default=None,
+                   help="reference clip (.npz) for mimic tasks")
+    p.add_argument("--hold-final-s", type=float, default=None,
+                   help="mimic tasks: hold the last frame this long after the clip (default 0.6 s; 0 for walking)")
     return p.parse_args()
 
 
@@ -125,8 +128,8 @@ def main() -> None:
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
-    env = tasks.make_env(args.task, args.impl, ppo_cfg.num_envs, args.reference)
-    eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference)
+    env = tasks.make_env(args.task, args.impl, ppo_cfg.num_envs, args.reference, hold_final_s=args.hold_final_s)
+    eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s)
     episode_length = tasks.episode_length(env)
 
     run_config = {
