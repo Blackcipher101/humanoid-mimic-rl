@@ -33,8 +33,9 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
     JOINT_NAMES = g1_model.G1_JOINT_NAMES
     END_EFFECTOR_SITES = g1_model.END_EFFECTOR_SITES
     # False: playground's position servos. True (flip tasks): torque motors limited
-    # to g1_model.flip_peak_torques, driven by a PD-to-torque layer evaluated every
-    # physics substep (see ``physics_step``).
+    # to g1_model.flip_peak_torques(model, config.torque_scale), driven by a
+    # PD-to-torque layer evaluated every physics substep (see ``physics_step``).
+    # torque_scale != 1 is a MODIFIED robot (see g1_model.torque_scale_label).
     TORQUE_MODE: bool = False
 
     def __init__(self, config: config_dict.ConfigDict, config_overrides: dict[str, Any] | None = None) -> None:
@@ -44,7 +45,8 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
         self._mj_model = mujoco.MjModel.from_xml_string(scene_xml, assets=assets)
         self._mj_model.opt.timestep = self.sim_dt
         if self.TORQUE_MODE:
-            peak = g1_model.flip_peak_torques(self._mj_model)
+            self._torque_scale = float(self._config.get("torque_scale", 1.0))
+            peak = g1_model.flip_peak_torques(self._mj_model, self._torque_scale)
             g1_model.to_torque_motors(self._mj_model, peak)
             kp, kd = g1_model.flip_pd_gains(peak)
             slack = g1_model.FLIP_PD_TARGET_SLACK_RAD
@@ -144,6 +146,16 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
             return mjx.step(self.mjx_model, d.replace(ctrl=tau)), None
 
         return jax.lax.scan(substep, data, None, self.n_substeps)[0]
+
+    @property
+    def torque_scale(self) -> float:
+        """Multiplier on the published peak torques (1 = real robot limits; servo mode: 1)."""
+        return self._torque_scale if self.TORQUE_MODE else 1.0
+
+    @property
+    def model_label(self) -> str:
+        """Disclaimer for metrics and video captions."""
+        return g1_model.torque_scale_label(self.torque_scale)
 
     # Observations -------------------------------------------------------
 
