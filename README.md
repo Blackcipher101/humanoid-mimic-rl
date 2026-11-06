@@ -261,6 +261,16 @@ an explicit k:
   rollout videos carry the label; it is burned into the frames when k != 1.
 * T1 tasks and playground's shared G1 are unaffected.
 
+Pass criterion: the inverse-dynamics check **and** the motion requirements
+(landed, full -2*pi rotation, touchdown speed, flight clearance, apex rise,
+travel, joint limits, each re-evaluated on the exported clip). Without the
+motion requirements, a jump with no rotation could pass. A local k = 3 run
+(23 workers, 60 CMA-ES generations per step, ~8 min) did exactly that: it
+passed the dynamics checks (flight root force 3.6 N, torque 0.67 N m; normal
+force, friction and CoP fine; worst torque ratio 2.19 at the waist pitch) but
+did not rotate at all (landing pitch ~4 rad short) and violated flight
+clearance. It now counts as a FAIL.
+
 Fixes in this round:
 * the apex-rise and travel limits are now per-sample constraints. A single
   residual was drowned by the per-sample torque terms; the ws1 apex was still

@@ -11,7 +11,9 @@ the file only exists after a successful ``--optimize`` run.
 The clip is then checked by ``flip_dynamics.check_clip``, an inverse-dynamics
 test that only sees the clip (finite-difference velocities/accelerations):
 in-flight root wrench, foot-contact feasibility in stance, joint torques vs
-actuator caps. The script exits with status 1 if a check fails.
+actuator caps. The clip must also meet the motion requirements (landed,
+full -2 pi rotation, touchdown speed, clearance, apex/travel, joint limits),
+re-evaluated on the exported clip. The script exits with status 1 if either fails.
 
 Model source: installed ``mujoco_playground`` (default) or
 ``--g1-xml-dir`` (playground's ``locomotion/g1/xmls``) + ``--mesh-dir``
@@ -35,13 +37,18 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from humanoid_mimic_rl import flip_dynamics, flip_opt, g1_backflip, g1_model, reference  # noqa: E402
+from humanoid_mimic_rl import flip_dynamics, flip_opt, g1_backflip, g1_model, metrics, reference  # noqa: E402
 
 OPT_RATE_HZ = 100.0  # constraint sampling during optimisation
 CLIP_RATE_HZ = 400.0  # exported clip (finite differences in the checker scale with 1/rate^2)
 TORQUE_MARGIN = 0.85  # default target: torque <= 85 % of min(force limit, PD authority)
 ROOT_FORCE_TOL_FRAC = 0.02  # in-flight root force tolerance, fraction of body weight
 ROOT_TORQUE_TOL_NM = 2.0
+# Motion requirements (landed, full -2 pi rotation, touchdown speed, clearance, apex/travel,
+# joint limits) are the optimiser's constraint groups re-evaluated on the exported clip; each
+# is scaled so 1.0 = its tolerance quantum (0.05 rad landing pitch, 1 cm clearance, 0.05 m/s
+# touchdown speed, 2 cm apex/travel, ...). A clip passes only if all are within this.
+MOTION_VIOLATION_TOL = 1.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,8 +134,11 @@ def build_and_check(
     fb = problem.fb
     report = flip_dynamics.check_clip(fb, clip, clip.foot_contact, g1_model.G1_JOINT_NAMES)
     root_force_tol = ROOT_FORCE_TOL_FRAC * report.body_weight_n
-    passed = report.passes(torque_margin, g1_model.FOOT_FRICTION, root_force_tol, ROOT_TORQUE_TOL_NM)
-    pitch = np.unwrap(2.0 * np.arctan2(clip.qpos[:, 5], clip.qpos[:, 3]))
+    dynamics_ok = report.passes(torque_margin, g1_model.FOOT_FRICTION, root_force_tol, ROOT_TORQUE_TOL_NM)
+    motion_violations = {k: v for k, v in violations.items() if k != "ineq_torque"}  # torque: checker above
+    motion_ok = rollout.landed and all(v <= MOTION_VIOLATION_TOL for v in motion_violations.values())
+    passed = dynamics_ok and motion_ok
+    rotation = float(metrics.cumulative_pitch_rad(clip.qpos[None, :, 3:7])[0, -1])
     summary: dict[str, object] = {
         "clip": str(out),
         "torque_scale": torque_scale,
@@ -145,7 +155,8 @@ def build_and_check(
         "touchdown_foot_velocity": dict(
             zip(("vx_mps", "vz_mps", "pitch_rate_radps"), rollout.touchdown_foot_vel.tolist())
         ),
-        "root_rotation_rad": float(pitch[-1] - pitch[0]),
+        "root_rotation_rad": rotation,
+        "full_rotation": bool(abs(rotation + 2.0 * np.pi) <= 0.05 * MOTION_VIOLATION_TOL),
         "root_displacement_x_m": float(clip.qpos[-1, 0] - clip.qpos[0, 0]),
         "apex_root_height_m": float(np.max(clip.qpos[:, 2])),
         "apex_root_rise_m": float(np.max(clip.qpos[:, 2]) - problem.s.home_qpos[2]),
@@ -163,6 +174,9 @@ def build_and_check(
             "min_normal_force_frac_per_foot": flip_dynamics.MIN_NORMAL_FORCE_FRAC,
             "cop_tolerance_m": flip_dynamics.COP_TOLERANCE_M,
         },
+        "dynamics_check_passed": dynamics_ok,
+        "motion_requirements_passed": motion_ok,
+        "motion_violation_tolerance": MOTION_VIOLATION_TOL,
         "passed": passed,
     }
     report_path = g1_model.clip_report_path(out)
