@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--logdir", type=Path, default=REPO_ROOT / "runs")
     p.add_argument("--reference", "--clip", dest="reference", type=Path, default=None,
                    help="reference clip (.npz)")
+    p.add_argument("--torque-scale", type=float, default=None,
+                   help="G1 flip tasks: peak-torque multiplier; must match the clip report (default: read from it)")
     p.add_argument("--hold-final-s", type=float, default=None,
                    help="hold the last frame this long after the clip (default 0.6 s; 0 for walking)")
     return p.parse_args()
@@ -85,8 +87,10 @@ def main() -> None:
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
-    env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s)
-    eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s)
+    env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
+                         torque_scale=args.torque_scale)
+    eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
+                         torque_scale=args.torque_scale)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
     run_config = {
@@ -97,11 +101,14 @@ def main() -> None:
         "seed": args.seed,
         "supermimic": dataclasses.asdict(cfg),
         "env_config": env.unwrapped._config.to_dict(),  # pylint: disable=protected-access
+        "model_label": getattr(env.unwrapped, "model_label", None),
         "versions": _versions(),
         "devices": [str(d) for d in jax.devices()],
     }
     (run_dir / "run_config.json").write_text(json.dumps(run_config, indent=2, default=str), encoding="utf-8")
     print(f"run dir: {run_dir}", flush=True)
+    if run_config["model_label"]:
+        print(f"model: {run_config['model_label']}", flush=True)
     print(f"devices: {run_config['devices']}  versions: {run_config['versions']}", flush=True)
 
     check = trainer.self_check(args.seed)

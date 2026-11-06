@@ -5,6 +5,10 @@
   taken from the optimised clip (``scripts/make_g1_backflip.py``).
 * ``G1Mimic``: DeepMimic tracking (``mimic.MimicTask``) of the same clip.
 
+With ``config.torque_scale`` k != 1 the robot is a MODIFIED G1: all peak
+torques are k x the published ones (``g1_model.torque_scale_label``); metrics
+and videos carry that label.
+
 Both run in torque mode (``G1FullCollisionEnv.TORQUE_MODE``): torque motors
 limited to the G1 EDU peak torques (``g1_model.flip_peak_torques``) behind a
 PD-to-torque layer, the same actuator limits the reference was optimised and
@@ -24,6 +28,13 @@ from humanoid_mimic_rl.envs import backflip, mimic
 from humanoid_mimic_rl.envs.g1_full_collision import G1FullCollisionEnv
 
 
+def mimic_config(torque_scale: float) -> config_dict.ConfigDict:
+    """DeepMimic config for the G1 clip with the clip's torque scale."""
+    cfg = mimic.default_config()
+    cfg.torque_scale = float(torque_scale)
+    return cfg
+
+
 def flight_window(clip: reference.ReferenceClip) -> tuple[float, float]:
     """Take-off and touch-down times (s) from the clip's foot-contact flags (one flight phase)."""
     if clip.foot_contact.size != clip.num_frames:
@@ -40,10 +51,13 @@ def root_pitch_unwrapped(clip: reference.ReferenceClip) -> np.ndarray:
     return np.unwrap(2.0 * np.arctan2(q[:, 2], q[:, 0]))
 
 
-def backflip_config(reference_path: str) -> config_dict.ConfigDict:
+def backflip_config(reference_path: str, torque_scale: float) -> config_dict.ConfigDict:
+    """Backflip config for the G1 clip; ``torque_scale`` must be the clip's (see
+    ``g1_model.resolve_torque_scale``)."""
     cfg = backflip.default_config()
     clip = reference.load_clip(Path(reference_path))
     cfg.reference_path = reference_path
+    cfg.torque_scale = float(torque_scale)
     cfg.episode_length = int(math.ceil(clip.duration_s / cfg.ctrl_dt))
     return cfg
 

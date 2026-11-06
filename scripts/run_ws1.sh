@@ -6,13 +6,18 @@
 #   scripts/run_ws1.sh full  [TASK ...]   # real budgets from humanoid_mimic_rl/configs.py
 # TASK defaults to: walk getup backflip mimic supermimic
 # ("supermimic" = the mimic task trained with train_supermimic.py instead of PPO)
-# G1 flip tasks (Unitree G1, dynamically consistent optimised clip):
-#   g1_backflip g1_mimic g1_supermimic        e.g. scripts/run_ws1.sh smoke g1_backflip g1_mimic g1_supermimic
+# G1 flip tasks (Unitree G1, dynamically consistent optimised clip), SuperMimic first:
+#   g1_supermimic g1_backflip g1_mimic        e.g. scripts/run_ws1.sh smoke g1_supermimic g1_backflip g1_mimic
+# The G1 clip is built (torque-scale sweep, see below) if missing; training uses the
+# torque scale recorded in its report and refuses a clip that failed the check.
 #
 # Environment variables:
 #   VENV   python venv to activate          (default: $HOME/.venvs/mjrl)
 #   IMPL   MJX implementation, jax | warp   (default: jax)
 #   LOGDIR run output directory             (default: <repo>/runs)
+#   WORKERS    CPU processes for the G1 clip optimisation (default: 12)
+#   SCALES     torque scales to try for the G1 clip (default: "3 4 6"; k != 1 = MODIFIED robot)
+#   MEM_FRACTION  XLA_PYTHON_CLIENT_MEM_FRACTION, shared GPU (default: 0.45)
 #   EXTRA  extra args for train.py / train_supermimic.py
 #          (e.g. "--num-timesteps 50000000" or, for supermimic, "--iterations 8000")
 #
@@ -39,6 +44,7 @@ source "$VENV/bin/activate"
 export MUJOCO_GL=egl
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_PYTHON_CLIENT_MEM_FRACTION="${MEM_FRACTION:-0.45}"
 cd "$REPO"
 
 echo "== $(date -Is) repo=$REPO profile=$PROFILE impl=$IMPL tasks=${TASKS[*]}"
@@ -64,9 +70,12 @@ for task in "${TASKS[@]}"; do
   if [[ "$task" == g1_* && ! -f "$G1REF" ]]; then
     echo "== building G1 backflip clip + inverse-dynamics feasibility report $G1REF"
     opt=()
-    [[ -f "$REPO/humanoid_mimic_rl/data/g1_backflip_solution.json" ]] || opt=(--optimize --workers "$(nproc)")
+    if [[ ! -f "$REPO/humanoid_mimic_rl/data/g1_backflip_solution.json" ]]; then
+      # shellcheck disable=SC2206
+      opt=(--optimize --workers "${WORKERS:-12}" --generations 1500 --torque-scales ${SCALES:-3 4 6})
+    fi
     # exits non-zero if the inverse-dynamics feasibility check fails: no training on an infeasible clip
-    python scripts/make_g1_backflip.py --out "$G1REF" "${opt[@]}"
+    python scripts/make_g1_backflip.py --out "$G1REF" "${opt[@]}" 2>&1 | tee "$LOGDIR/g1_clip_$(date +%Y%m%d-%H%M%S).log"
     python eval_render.py --reference-only "$G1REF" --render-every 2 --playback-speed 0.5
     break
   fi

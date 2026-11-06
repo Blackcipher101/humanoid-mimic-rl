@@ -93,7 +93,26 @@ def render_qpos(model: mujoco.MjModel, qpos: np.ndarray, width: int, height: int
     return frames
 
 
-def write_video(path: Path, frames: list[np.ndarray], step_dt_s: float, render_every: int, speed: float) -> None:
+def caption_frames(frames: list[np.ndarray], text: str | None) -> list[np.ndarray]:
+    """Burn ``text`` (e.g. a modified-model disclaimer) into the top of every frame."""
+    if not text:
+        return frames
+    from PIL import Image, ImageDraw  # pylint: disable=import-outside-toplevel  (Pillow ships with mediapy)
+
+    out = []
+    for frame in frames:
+        img = Image.fromarray(frame)
+        draw = ImageDraw.Draw(img)
+        box = draw.textbbox((8, 6), text)
+        draw.rectangle((box[0] - 4, box[1] - 3, box[2] + 4, box[3] + 3), fill=(0, 0, 0))
+        draw.text((8, 6), text, fill=(255, 255, 255))
+        out.append(np.asarray(img))
+    return out
+
+
+def write_video(path: Path, frames: list[np.ndarray], step_dt_s: float, render_every: int, speed: float,
+                caption: str | None = None) -> None:
+    frames = caption_frames(frames, caption)
     fps = speed / (step_dt_s * render_every)
     mediapy.write_video(str(path), frames, fps=fps)
     print(f"wrote {path} ({len(frames)} frames @ {fps:.1f} fps)", flush=True)
@@ -102,8 +121,11 @@ def write_video(path: Path, frames: list[np.ndarray], step_dt_s: float, render_e
 def render_reference(path: Path, args: argparse.Namespace) -> None:
     clip = reference.load_clip(path)
     mjx_env.ensure_menagerie_exists()
+    caption = None
     if clip.joint_names == g1_model.G1_JOINT_NAMES:
         scene, assets = g1_model.full_collision_flat_scene(g1_base.get_assets())
+        scale = g1_model.resolve_torque_scale(path, None)
+        caption = f"reference clip ({g1_model.torque_scale_label(scale)})"
     else:
         scene, assets = t1_model.full_collision_flat_scene(t1_base.get_assets())
     model = mujoco.MjModel.from_xml_string(scene, assets=assets)
@@ -111,7 +133,7 @@ def render_reference(path: Path, args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     frames = render_qpos(model, clip.qpos[:: args.render_every], args.width, args.height)
     write_video(out_dir / f"{path.stem}_reference.mp4", frames, 1.0 / clip.fps_hz, args.render_every,
-                args.playback_speed)
+                args.playback_speed, caption)
     print(f"licence: {clip.licence}")
 
 
@@ -248,7 +270,8 @@ def main() -> None:
 
     hold = run_cfg["env_config"].get("hold_final_s")
     env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True,
-                         hold_final_s=hold)
+                         hold_final_s=hold, torque_scale=run_cfg["env_config"].get("torque_scale"))
+    model_label = getattr(env.unwrapped, "model_label", None)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)
     print(f"task={task} algo={algo} checkpoint={ckpt} episodes={args.num_episodes} steps={steps}", flush=True)
@@ -265,6 +288,7 @@ def main() -> None:
         "episode_steps": steps,
         "ctrl_dt_s": env.dt,
         "walk_command": list(args.walk_command) if task == "walk" else None,
+        "model_label": model_label,
         "metrics": summary,
     }
     (out_dir / "metrics.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
@@ -274,7 +298,8 @@ def main() -> None:
     for i in range(min(args.video_episodes, args.num_episodes)):
         qpos = tr["qpos"][i, : lengths[i] : args.render_every]
         frames = render_qpos(env.mj_model, qpos, args.width, args.height)
-        write_video(out_dir / f"rollout_{i}.mp4", frames, env.dt, args.render_every, args.playback_speed)
+        write_video(out_dir / f"rollout_{i}.mp4", frames, env.dt, args.render_every, args.playback_speed,
+                    model_label if getattr(env.unwrapped, "torque_scale", 1.0) != 1.0 else None)
 
 
 if __name__ == "__main__":

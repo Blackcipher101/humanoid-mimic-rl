@@ -32,6 +32,8 @@ from humanoid_mimic_rl import quat, reference
 
 GRAVITY_MPS2 = 9.81
 COP_TOLERANCE_M = 0.005  # CoP may lie this far outside the touching sole region (numerics)
+MIN_NORMAL_FORCE_FRAC = 0.01  # per-foot normal force below this fraction of body weight = losing contact
+NO_SUPPORT_COP_OUTSIDE_M = 1.0  # reported when no sole corner touches the floor (finite for JSON)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -182,7 +184,7 @@ def cop_outside_support(cop: np.ndarray, corners: np.ndarray, touch_tol_m: float
     the toe corners touch, so the support shrinks to the toe line."""
     touching = corners[corners[:, 2] < touch_tol_m]
     if touching.shape[0] == 0:
-        return float("inf")
+        return NO_SUPPORT_COP_OUTSIDE_M
     lo, hi = touching[:, :2].min(axis=0), touching[:, :2].max(axis=0)
     out = np.maximum(lo - cop, 0.0) + np.maximum(cop - hi, 0.0)
     return float(np.linalg.norm(out))
@@ -199,9 +201,10 @@ class DynamicsReport:
     flight_root_force_max_n: float
     flight_root_torque_max_nm: float
     body_weight_n: float
-    stance_min_normal_force_n: float
-    stance_max_friction_ratio: float
-    stance_max_cop_outside_m: float
+    stance_min_normal_force_n: float  # per foot; 0.0 if there is no stance frame
+    stance_low_normal_frames: int  # per-foot normal force < MIN_NORMAL_FORCE_FRAC of body weight
+    stance_max_friction_ratio: float  # over frames with adequate normal force only
+    stance_max_cop_outside_m: float  # over frames with adequate normal force only
     torque_ratio_max: float
     torque_ratio_by_joint: dict[str, float]
     worst_joint: str
@@ -212,7 +215,7 @@ class DynamicsReport:
         return (
             self.flight_root_force_max_n <= root_force_tol_n
             and self.flight_root_torque_max_nm <= root_torque_tol_nm
-            and self.stance_min_normal_force_n >= 0.0
+            and self.stance_low_normal_frames == 0
             and self.stance_max_friction_ratio <= friction
             and self.stance_max_cop_outside_m <= COP_TOLERANCE_M
             and self.torque_ratio_max <= torque_margin
@@ -232,7 +235,9 @@ def check_clip(
     stencil straddles a contact change are excluded (the true acceleration
     is discontinuous there). Flight frames must need ~zero root wrench;
     stance frames need a foot wrench with positive normal force, inside the
-    friction cone and with the centre of pressure on the sole; all frames
+    friction cone and with the floor centre of pressure inside the region
+    spanned by the sole corners that touch the floor (toe line when the heel
+    is lifted); all frames
     need joint torques within ``actuator_caps``.
     """
     qpos = clip.qpos
@@ -245,7 +250,9 @@ def check_clip(
     for i in flip:
         changed[max(i - 1, 0) : min(i + 3, n)] = True
     changed[[0, 1, -2, -1]] = True  # one-sided differences at the clip ends
-    root_f, root_t, fz_min, fric, cop_out = [0.0], [0.0], [np.inf], [0.0], [0.0]
+    root_f, root_t, fz_all, fric, cop_out = [0.0], [0.0], [], [0.0], [0.0]
+    low_normal = 0
+    fz_min_n = MIN_NORMAL_FORCE_FRAC * fb.mass_kg * GRAVITY_MPS2
     ratio = np.zeros(fb.m.nu)
     for k in range(n):
         if changed[k]:
@@ -255,10 +262,13 @@ def check_clip(
         if contact[k]:
             w, tau = fb.foot_wrench(f)
             fz = w[2]
-            fz_min.append(fz)
-            fric.append(np.hypot(w[0], w[1]) / max(fz, 1e-9))
-            centre, corners = fb.sole_centre_and_corners(0)
-            cop_out.append(cop_outside_support(ground_cop(centre, w), corners) if fz > 0 else float("inf"))
+            fz_all.append(fz)
+            if fz < fz_min_n:  # friction/CoP ratios are meaningless as F_z -> 0: count instead
+                low_normal += 1
+            else:
+                fric.append(np.hypot(w[0], w[1]) / fz)
+                centre, corners = fb.sole_centre_and_corners(0)
+                cop_out.append(cop_outside_support(ground_cop(centre, w), corners))
         else:
             tau = f[6:]
             root_f.append(float(np.linalg.norm(f[0:3])))
@@ -275,7 +285,8 @@ def check_clip(
         flight_root_force_max_n=float(np.max(root_f)),
         flight_root_torque_max_nm=float(np.max(root_t)),
         body_weight_n=fb.mass_kg * GRAVITY_MPS2,
-        stance_min_normal_force_n=float(np.min(fz_min)) if len(fz_min) > 1 else float("nan"),
+        stance_min_normal_force_n=float(np.min(fz_all)) if fz_all else 0.0,
+        stance_low_normal_frames=low_normal,
         stance_max_friction_ratio=float(np.max(fric)),
         stance_max_cop_outside_m=float(np.max(cop_out)),
         torque_ratio_max=float(np.max(ratio)),
