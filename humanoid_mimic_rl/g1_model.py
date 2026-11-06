@@ -131,3 +131,38 @@ def full_collision_flat_scene(assets: Mapping[str, bytes]) -> tuple[str, dict[st
     out = dict(assets)
     out[FULL_COLLISION_XML_NAME] = make_full_collision_xml(assets[ROBOT_XML_NAME].decode("utf-8")).encode("utf-8")
     return make_scene_xml(assets[FLAT_SCENE_XML_NAME].decode("utf-8"), FULL_COLLISION_XML_NAME), out
+
+
+# ----------------------------------------------------------------------
+# Servo stiffness for the FLIP tasks only (g1_backflip / g1_mimic / g1_supermimic).
+# Playground's G1 uses kp 20 (ankle pitch) and kp 2 (ankle roll); with position
+# servos the reachable torque is kp * |ctrl limit - q|, so a plantar-flexed ankle
+# can only push with a few N m although its force limit is 50 N m.
+# Values from Unitree's public G1 gains (both BSD-3-Clause, Unitree Robotics):
+#   * unitree_rl_gym @ 276801e, legged_gym/envs/g1/g1_config.py: stiffness 'ankle': 40
+#   * unitree_sdk2 @ 8e1b927, example/g1/low_level/g1_ankle_swing_example.cpp:
+#     Kp ankle pitch/roll 40, waist yaw 60, waist roll/pitch 40
+# Waist: playground's kp 75 is already above Unitree's public 40, so it is kept.
+# (Menagerie's non-MJX g1.xml uses kp 500 everywhere but marks the actuators
+# "needs tuning", so it is not used as evidence.) Force limits are unchanged.
+# ----------------------------------------------------------------------
+FLIP_SERVO_KP: dict[str, float] = {
+    "left_ankle_pitch_joint": 40.0,
+    "right_ankle_pitch_joint": 40.0,
+    "left_ankle_roll_joint": 40.0,
+    "right_ankle_roll_joint": 40.0,
+}
+
+
+def apply_servo_kp(model: object, kp_by_joint: Mapping[str, float]) -> None:
+    """Set position-servo stiffness of ``mujoco.MjModel`` actuators driving the named joints.
+
+    MuJoCo position actuators compute ``kp * ctrl - kp * q - kv * qd``: gain
+    ``gainprm[0] = kp`` and bias ``biasprm[1] = -kp``; both are updated so the
+    servo stays consistent. Raises ``KeyError`` for unknown joints.
+    """
+    joint_of_actuator = {model.joint(int(model.actuator_trnid[a, 0])).name: a for a in range(model.nu)}
+    for name, kp in kp_by_joint.items():
+        a = joint_of_actuator[name]
+        model.actuator_gainprm[a, 0] = kp
+        model.actuator_biasprm[a, 1] = -kp

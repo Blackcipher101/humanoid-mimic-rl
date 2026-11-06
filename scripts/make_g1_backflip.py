@@ -39,7 +39,7 @@ from humanoid_mimic_rl import flip_dynamics, flip_opt, g1_backflip, g1_model, re
 
 OPT_RATE_HZ = 100.0  # constraint sampling during optimisation
 CLIP_RATE_HZ = 200.0  # exported clip
-TORQUE_MARGIN = 0.85
+TORQUE_MARGIN = 0.85  # default target: torque <= 85 % of min(force limit, PD authority)
 ROOT_FORCE_TOL_FRAC = 0.02  # in-flight root force tolerance, fraction of body weight
 ROOT_TORQUE_TOL_NM = 2.0
 
@@ -83,20 +83,28 @@ def push_mask(problem: flip_opt.FlipProblem) -> np.ndarray:
     return push
 
 
-def optimise(factory: ProblemFactory, x0: np.ndarray, workers: int, generations: int) -> np.ndarray:
+def optimise(
+    factory: ProblemFactory, x0: np.ndarray, workers: int, generations: int, torque_margin: float
+) -> np.ndarray:
     """Push-off least squares (take-off momentum targets), then CMA-ES with the torque
-    margin tightened 3.0 -> 1.5 -> 0.85 (derivative-free: the event times make the
-    residual discontinuous), then a least-squares polish of all parameters."""
+    margin tightened 3.0 -> 1.5 -> ``torque_margin`` (derivative-free: the event times
+    make the residual discontinuous), then a least-squares polish of all parameters."""
     log = lambda s: print(s, flush=True)  # noqa: E731
     problem = factory()
     x = flip_opt.solve_staged(factory, x0, [("takeoff@3.0", push_mask(problem), 600)], workers, log)
     sigma = 0.05
-    for margin in (3.0, 1.5, None):
-        stage = "full" if margin is None else f"full@{margin}"
+    for margin in (3.0, 1.5, torque_margin):
+        stage = f"full@{margin}"
         x = flip_opt.cmaes(factory, x, stage, sigma, generations, workers, log, popsize=2 * workers)
         sigma *= 0.5
     every = np.ones(problem.s.num_params, dtype=bool)
-    return flip_opt.solve_staged(factory, x, [("full", every, 600)], workers, log)
+    return flip_opt.solve_staged(factory, x, [(f"full@{torque_margin}", every, 600)], workers, log)
+
+
+def effective_caps(fb: flip_dynamics.FloatingBaseModel) -> dict[str, list[float]]:
+    """[positive, negative] torque cap (N m) per joint at the home pose: min(force limit, PD authority)."""
+    pos, neg = fb.actuator_caps(fb.m.keyframe("home").qpos[7:])
+    return {name: [float(a), float(b)] for name, a, b in zip(g1_model.G1_JOINT_NAMES, pos, neg)}
 
 
 def main() -> int:
@@ -106,6 +114,10 @@ def main() -> int:
     p.add_argument("--warm-start", action="store_true", help="optimise from the shipped solution, not the initial guess")
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--generations", type=int, default=600, help="CMA-ES generations per continuation step")
+    p.add_argument(
+        "--torque-margin", type=float, default=TORQUE_MARGIN,
+        help="max torque / cap for the final optimisation stage AND the pass/fail check (report it if != 0.85)",
+    )
     p.add_argument("--g1-xml-dir", type=Path, default=None)
     p.add_argument("--mesh-dir", type=Path, default=None)
     args = p.parse_args()
@@ -122,7 +134,7 @@ def main() -> int:
             else g1_backflip.initial_params(problem)
         )
         t0 = time.monotonic()
-        x = optimise(factory, x0, args.workers, args.generations)
+        x = optimise(factory, x0, args.workers, args.generations, args.torque_margin)
         g1_backflip.save_solution(g1_backflip.SOLUTION_PATH, x, {"optimisation_wall_s": time.monotonic() - t0})
         print(f"saved {g1_backflip.SOLUTION_PATH}")
     else:
@@ -139,7 +151,7 @@ def main() -> int:
     fb = problem.fb
     report = flip_dynamics.check_clip(fb, clip, clip.foot_contact, g1_model.G1_JOINT_NAMES)
     root_force_tol = ROOT_FORCE_TOL_FRAC * report.body_weight_n
-    passed = report.passes(TORQUE_MARGIN, g1_model.FOOT_FRICTION, root_force_tol, ROOT_TORQUE_TOL_NM)
+    passed = report.passes(args.torque_margin, g1_model.FOOT_FRICTION, root_force_tol, ROOT_TORQUE_TOL_NM)
     pitch = np.unwrap(2.0 * np.arctan2(clip.qpos[:, 5], clip.qpos[:, 3]))
     summary = {
         "clip": str(args.out),
@@ -156,9 +168,11 @@ def main() -> int:
         "root_displacement_x_m": float(clip.qpos[-1, 0] - clip.qpos[0, 0]),
         "apex_root_height_m": float(np.max(clip.qpos[:, 2])),
         "optimiser_constraint_violations": violations,
+        "servo_kp_overrides": g1_model.FLIP_SERVO_KP,
+        "effective_torque_cap_at_home_nm": effective_caps(fb),
         "check": dataclasses.asdict(report),
         "check_thresholds": {
-            "torque_ratio_max": TORQUE_MARGIN,
+            "torque_ratio_max": args.torque_margin,
             "friction": g1_model.FOOT_FRICTION,
             "flight_root_force_n": root_force_tol,
             "flight_root_torque_nm": ROOT_TORQUE_TOL_NM,
