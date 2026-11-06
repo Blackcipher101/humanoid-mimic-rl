@@ -51,6 +51,9 @@ def parse_args() -> argparse.Namespace:
                    help="reference clip (.npz)")
     p.add_argument("--torque-scale", type=float, default=None,
                    help="G1 flip tasks: peak-torque multiplier; must match the clip report (default: read from it)")
+    p.add_argument("--allow-infeasible-clip", action="store_true",
+                   help="G1: train on a clip that FAILED the torque feasibility check (recorded in run_config; "
+                        "the robot keeps its torque limits, so the policy only approximates the clip)")
     p.add_argument("--hold-final-s", type=float, default=None,
                    help="hold the last frame this long after the clip (default 0.6 s; 0 for walking)")
     p.add_argument("--termination", default=None, choices=("root_pose", "height_tilt"),
@@ -91,9 +94,11 @@ def main() -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
     env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
-                         torque_scale=args.torque_scale, termination=args.termination)
+                         torque_scale=args.torque_scale, termination=args.termination,
+                         allow_infeasible_clip=args.allow_infeasible_clip)
     eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
-                         torque_scale=args.torque_scale, termination=args.termination, eval_mode=True)
+                         torque_scale=args.torque_scale, termination=args.termination,
+                         allow_infeasible_clip=args.allow_infeasible_clip, eval_mode=True)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
     run_config = {
@@ -106,6 +111,7 @@ def main() -> None:
         "supermimic": dataclasses.asdict(cfg),
         "env_config": env.unwrapped._config.to_dict(),  # pylint: disable=protected-access
         "model_label": getattr(env.unwrapped, "model_label", None),
+        "allow_infeasible_clip": args.allow_infeasible_clip,
         "versions": _versions(),
         "devices": [str(d) for d in jax.devices()],
     }

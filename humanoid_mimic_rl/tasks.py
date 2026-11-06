@@ -40,6 +40,7 @@ def make_env(
     hold_final_s: float | None = None,
     torque_scale: float | None = None,
     termination: str | None = None,
+    allow_infeasible_clip: bool = False,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -57,6 +58,8 @@ def make_env(
         Default and required value: the one recorded in ``<clip>.report.json``.
       termination: mimic tasks only: ``"root_pose"`` or ``"height_tilt"``
         (default: the env config's ``"root_pose"``); see ``envs.mimic``.
+      allow_infeasible_clip: G1 mimic/flip tasks only: accept a clip whose report FAILED the
+        torque feasibility check (see ``g1_model.resolve_torque_scale``).
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. For ``mimic`` / ``g1_mimic``, every episode
         starts at clip time 0 (``rsi_start_prob=1``) so the whole clip is scored.
@@ -90,7 +93,7 @@ def make_env(
         return mimic.T1Mimic(cfg, overrides)
     if task in ("g1_backflip", "g1_mimic"):
         path = (reference_path or G1_REFERENCE_PATH).resolve()
-        scale = g1_model.resolve_torque_scale(path, torque_scale)
+        scale = g1_model.resolve_torque_scale(path, torque_scale, allow_infeasible_clip)
         if task == "g1_backflip":
             return g1_flip.G1Backflip(g1_flip.backflip_config(str(path), scale), overrides)
         cfg = g1_flip.mimic_config(scale)

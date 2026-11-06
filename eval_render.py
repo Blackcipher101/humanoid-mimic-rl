@@ -124,7 +124,7 @@ def render_reference(path: Path, args: argparse.Namespace) -> None:
     caption = None
     if clip.joint_names == g1_model.G1_JOINT_NAMES:
         scene, assets = g1_model.full_collision_flat_scene(g1_base.get_assets())
-        scale = g1_model.resolve_torque_scale(path, None)
+        scale = g1_model.resolve_torque_scale(path, None, allow_infeasible=True)  # preview only
         caption = f"reference clip ({g1_model.torque_scale_label(scale)})"
     else:
         scene, assets = t1_model.full_collision_flat_scene(t1_base.get_assets())
@@ -291,7 +291,8 @@ def main() -> None:
     hold = run_cfg["env_config"].get("hold_final_s")
     env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True,
                          hold_final_s=hold, torque_scale=run_cfg["env_config"].get("torque_scale"),
-                         termination=run_cfg["env_config"].get("termination"))
+                         termination=run_cfg["env_config"].get("termination"),
+                         allow_infeasible_clip=bool(run_cfg.get("allow_infeasible_clip", False)))
     model_label = getattr(env.unwrapped, "model_label", None)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)

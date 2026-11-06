@@ -190,13 +190,19 @@ def clip_report_path(clip_path: Path) -> Path:
     return Path(clip_path).with_suffix(".report.json")
 
 
-def resolve_torque_scale(clip_path: Path, requested: float | None) -> float:
+def resolve_torque_scale(clip_path: Path, requested: float | None, allow_infeasible: bool = False) -> float:
     """Torque scale a G1 flip env must use for ``clip_path``.
 
     The clip's report records the scale the clip was optimised and checked
     with; training on it with a different scale would make the reference
     infeasible (or the robot stronger than the check). ``requested`` (e.g. a
     ``--torque-scale`` flag) must match it if given.
+
+    ``allow_infeasible``: accept a clip whose report says it FAILED the
+    feasibility check (e.g. retargeted human mocap that exceeds the G1's
+    torques). The robot keeps the recorded torque limits, so the policy can
+    only approximate the clip; callers must record this choice (run_config)
+    and say so wherever results are reported.
     """
     report = clip_report_path(clip_path)
     if not report.is_file():
@@ -205,7 +211,11 @@ def resolve_torque_scale(clip_path: Path, requested: float | None) -> float:
     if recorded is None:
         raise ValueError(f"{report} has no torque_scale; regenerate the clip")
     if not json.loads(report.read_text(encoding="utf-8")).get("passed", False):
-        raise ValueError(f"{clip_path} FAILED the feasibility check ({report}); refusing to use it")
+        if not allow_infeasible:
+            raise ValueError(f"{clip_path} FAILED the feasibility check ({report}); refusing to use it "
+                             "(pass --allow-infeasible-clip to train an approximation at these torque limits)")
+        print(f"WARNING: {clip_path} FAILED the feasibility check ({report}); training anyway at torque scale "
+              f"{float(recorded)} (--allow-infeasible-clip): the policy can only approximate this clip", flush=True)
     if requested is not None and float(requested) != float(recorded):
         raise ValueError(f"--torque-scale {requested} != {recorded} recorded for {clip_path}")
     return float(recorded)
