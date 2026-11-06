@@ -301,6 +301,16 @@ Optimiser additions in this round:
 * the clip is exported at 400 Hz, so the checker's finite differences are 4x
   more accurate than at 200 Hz.
 
+### G1 clips from CMU mocap acrobatics (`scripts/make_g1_cmu_clip.py`)
+CMU Graphics Lab Motion Capture Database ("free for all uses"; do not resell the data, also not converted)
+-> `cmu_mocap.py` (ASF/AMC parser + FK; lengths x 0.056444 m = (1/0.45)*2.54/100 per the CMU FAQ; Y-up -> z-up)
+-> `g1_retarget.py` (Froude-scaled time sqrt(leg ratio), direction-matching IK with hard joint limits, flat static
+feet/hands, no floor penetration, smoothness pull) -> `g1_cmu_feasibility.py` (inverse dynamics at torque scale 1 with
+feet **and hands** as contacts via a per-frame LP; `flip_dynamics.check_clip` assumes symmetric two-foot contact).
+One cheap fix per failing clip: time-scale 1.1/1.2/1.3x (no flight) or ballistic CoM in flight segments.
+Run with `G1_XML_DIR`/`G1_MESH_DIR` and `CMU_MOCAP_DIR` set for `tests/test_cmu_retarget.py`. Clips and reports go to
+`data/generated/g1_cmu_<SS>_<TT>*.npz|.report.json` (git-ignored, like the backflip).
+
 ### Reference clip
 No licence-compatible humanoid backflip mocap exists for the T1 (see
 licences), so `scripts/make_reference.py` builds one from the backflip keyframes:
