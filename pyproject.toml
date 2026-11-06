@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "humanoid-mimic-rl"
+version = "0.1.0"
+description = "Humanoid walk / get-up / backflip policies with MuJoCo Playground, MJX and Brax PPO"
+requires-python = ">=3.11"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+# Training stack (install on the GPU machine, e.g. pip install "jax[cuda12]" first).
+train = ["playground>=0.2.0", "brax>=0.14.2", "mujoco>=3.6.0", "mujoco-mjx>=3.6.0", "mediapy", "imageio-ffmpeg"]
+test = ["pytest"]
+
+[tool.setuptools]
+packages = ["humanoid_mimic_rl", "humanoid_mimic_rl.envs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
