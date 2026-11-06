@@ -4,13 +4,15 @@
 # Usage (from anywhere):
 #   scripts/run_ws1.sh smoke [TASK ...]   # ~minutes per task; pipeline check only
 #   scripts/run_ws1.sh full  [TASK ...]   # real budgets from humanoid_mimic_rl/configs.py
-# TASK defaults to: walk getup backflip mimic
+# TASK defaults to: walk getup backflip mimic supermimic
+# ("supermimic" = the mimic task trained with train_supermimic.py instead of PPO)
 #
 # Environment variables:
 #   VENV   python venv to activate          (default: $HOME/.venvs/mjrl)
 #   IMPL   MJX implementation, jax | warp   (default: jax)
 #   LOGDIR run output directory             (default: <repo>/runs)
-#   EXTRA  extra args passed to train.py    (e.g. "--num-timesteps 50000000")
+#   EXTRA  extra args for train.py / train_supermimic.py
+#          (e.g. "--num-timesteps 50000000" or, for supermimic, "--iterations 8000")
 #
 # Every task's training and evaluation output is printed line by line and
 # tee'd to $LOGDIR/<profile>_<task>_<timestamp>.log. The script stops at the
@@ -21,7 +23,7 @@ PROFILE="${1:?usage: $0 smoke|full [TASK ...]}"
 shift
 case "$PROFILE" in smoke|full) ;; *) echo "profile must be smoke or full" >&2; exit 2 ;; esac
 TASKS=("$@")
-[[ ${#TASKS[@]} -eq 0 ]] && TASKS=(walk getup backflip mimic)
+[[ ${#TASKS[@]} -eq 0 ]] && TASKS=(walk getup backflip mimic supermimic)
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${VENV:-$HOME/.venvs/mjrl}"
@@ -57,7 +59,7 @@ fi
 
 REF="$REPO/data/generated/t1_backflip_keyframed.npz"
 for task in "${TASKS[@]}"; do
-  if [[ "$task" == mimic && ! -f "$REF" ]]; then
+  if [[ ( "$task" == mimic || "$task" == supermimic ) && ! -f "$REF" ]]; then
     echo "== generating reference clip $REF"
     python scripts/make_reference.py --out "$REF"
     python eval_render.py --reference-only "$REF" --render-every 2
@@ -68,12 +70,17 @@ for task in "${TASKS[@]}"; do
   stamp="$(date +%Y%m%d-%H%M%S)"
   log="$LOGDIR/${PROFILE}_${task}_${stamp}.log"
   echo "== $(date -Is) train $task ($PROFILE) -> $log"
-  # shellcheck disable=SC2086
-  python train.py --task "$task" --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 | tee "$log"
+  if [[ "$task" == supermimic ]]; then
+    # shellcheck disable=SC2086
+    python train_supermimic.py --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 | tee "$log"
+  else
+    # shellcheck disable=SC2086
+    python train.py --task "$task" --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 | tee "$log"
+  fi
   run_dir="$(grep -m1 '^run dir: ' "$log" | sed 's/^run dir: //')"
   if [[ "$PROFILE" == smoke ]]; then n_ep=16; else n_ep=128; fi
   speed=1.0
-  [[ "$task" == backflip || "$task" == mimic ]] && speed=0.5
+  [[ "$task" == backflip || "$task" == mimic || "$task" == supermimic ]] && speed=0.5
   echo "== $(date -Is) eval $task -> $run_dir/eval"
   python eval_render.py --run-dir "$run_dir" --num-episodes "$n_ep" --video-episodes 2 \
     --playback-speed "$speed" 2>&1 | tee -a "$log"

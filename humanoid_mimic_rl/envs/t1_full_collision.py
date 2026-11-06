@@ -171,6 +171,21 @@ class T1FullCollisionEnv(t1_base.T1Env):
     # Observations.
     # ------------------------------------------------------------------
 
+    @property
+    def default_pose(self) -> jax.Array:
+        """Home-pose joint angles (rad)."""
+        return self._default_pose
+
+    def obs_noise_half_widths(self) -> jax.Array:
+        """Half-widths of the uniform noise ``proprio_obs`` adds to
+        ``[gyro (3), gravity (3), joint pos (nu), joint vel (nu)]``."""
+        s = self._config.noise_config.scales
+        nu = self.action_size
+        widths = jp.concatenate(
+            [jp.full(3, s.gyro), jp.full(3, s.gravity), jp.full(nu, s.joint_pos), jp.full(nu, s.joint_vel)]
+        )
+        return widths * self._config.noise_config.level
+
     def _noisy(self, info: dict[str, Any], x: jax.Array, scale: float) -> jax.Array:
         info["rng"], key = jax.random.split(info["rng"])
         u = 2.0 * jax.random.uniform(key, shape=x.shape) - 1.0

@@ -5,6 +5,7 @@ Examples:
   python eval_render.py --run-dir runs/walk-full-20261106-120000
   python eval_render.py --run-dir runs/mimic-full-... --num-episodes 128 --playback-speed 0.5
   python eval_render.py --reference-only data/generated/t1_backflip_keyframed.npz   # kinematic clip video
+  python eval_render.py --run-dir runs/mimic-supermimic-full-...                      # SuperMimic checkpoint
 
 Writes to ``<run-dir>/eval/`` (or ``--out-dir``):
   metrics.json   task-specific metrics over ``--num-episodes`` deterministic-policy episodes
@@ -106,11 +107,24 @@ def render_reference(path: Path, args: argparse.Namespace) -> None:
     print(f"licence: {clip.licence}")
 
 
-def latest_checkpoint(run_dir: Path) -> Path:
-    ckpts = sorted(p for p in (run_dir / "checkpoints").iterdir() if p.is_dir())
+def latest_checkpoint(run_dir: Path, algo: str) -> Path:
+    """Latest Brax PPO checkpoint directory, or latest SuperMimic ``.msgpack`` file."""
+    entries = (run_dir / "checkpoints").iterdir()
+    if algo == "supermimic":
+        ckpts = sorted(p for p in entries if p.suffix == ".msgpack")
+    else:
+        ckpts = sorted(p for p in entries if p.is_dir())
     if not ckpts:
-        raise SystemExit(f"no checkpoints in {run_dir / 'checkpoints'}")
+        raise SystemExit(f"no {algo} checkpoints in {run_dir / 'checkpoints'}")
     return ckpts[-1]
+
+
+def load_policy(run_dir: Path, ckpt: Path, algo: str) -> Callable[..., Any]:
+    if algo == "supermimic":
+        from humanoid_mimic_rl.supermimic import trainer as sm  # pylint: disable=import-outside-toplevel
+
+        return sm.load_policy(ckpt, run_dir / "run_config.json")
+    return ppo_checkpoint.load_policy(ckpt, deterministic=True)
 
 
 def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, jax.Array]]:
@@ -193,21 +207,23 @@ def main() -> None:
 
     run_cfg = json.loads((args.run_dir / "run_config.json").read_text(encoding="utf-8"))
     task = run_cfg["task"]
+    algo = run_cfg.get("algo", "ppo")
     impl = args.impl or run_cfg["impl"]
     ref_path = run_cfg["env_config"].get("reference_path") or None
-    ckpt = args.checkpoint or latest_checkpoint(args.run_dir)
+    ckpt = args.checkpoint or latest_checkpoint(args.run_dir, algo)
     out_dir = args.out_dir or args.run_dir / "eval"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     env = tasks.make_env(task, impl, args.num_episodes, Path(ref_path) if ref_path else None, eval_mode=True)
     steps = tasks.episode_length(env)
-    policy = ppo_checkpoint.load_policy(ckpt, deterministic=True)
-    print(f"task={task} checkpoint={ckpt} episodes={args.num_episodes} steps={steps}", flush=True)
+    policy = load_policy(args.run_dir, ckpt, algo)
+    print(f"task={task} algo={algo} checkpoint={ckpt} episodes={args.num_episodes} steps={steps}", flush=True)
 
     tr = rollout(env, policy, task, args.num_episodes, steps, args.seed, np.asarray(args.walk_command))
     summary = summarize(task, tr, env.dt)
     result = {
         "task": task,
+        "algo": algo,
         "checkpoint": str(ckpt),
         "impl": impl,
         "seed": args.seed,

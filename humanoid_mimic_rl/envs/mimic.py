@@ -128,46 +128,97 @@ class T1Mimic(base.T1FullCollisionEnv):
         obs = self.proprio_obs(data, info, phase_features(data.time, self._episode_end_s))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
 
-    def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
-        c = self._config
-        q_next, _, _ = self.reference_at(state.data.time + self.dt)
-        data = self.physics_step(state.data, q_next[7:] + action * c.action_scale)
+    @property
+    def episode_end_s(self) -> float:
+        return self._episode_end_s
 
-        t = data.time
-        ref_q, ref_v, ref_sites = self.reference_at(t)
-        root_pos, root_quat = data.qpos[0:3], data.qpos[3:7]
+    @property
+    def ee_site_ids(self) -> np.ndarray:
+        return self._ee_site_ids
+
+    @property
+    def fall_geom_ids(self) -> np.ndarray:
+        return self._fall_geom_ids
+
+    def motor_targets(self, t_s: jax.Array, action: jax.Array) -> jax.Array:
+        """Joint position targets (rad) for the control step starting at ``t_s``."""
+        q_next, _, _ = self.reference_at(t_s + self.dt)
+        return q_next[7:] + action * self._config.action_scale
+
+    def reward_and_termination(
+        self,
+        qpos: jax.Array,
+        qvel: jax.Array,
+        ee_pos_m: jax.Array,
+        fall_geom_heights_m: jax.Array,
+        t_s: jax.Array,
+        action: jax.Array,
+        last_act: jax.Array,
+        last_last_act: jax.Array,
+    ) -> tuple[jax.Array, dict[str, jax.Array], dict[str, jax.Array]]:
+        """Reward and termination of the state reached at clip time ``t_s``.
+
+        Pure function of the robot state, so it is shared by ``step`` and by
+        the SuperMimic world-model rollouts (``humanoid_mimic_rl.supermimic``).
+        ``ee_pos_m`` are the world positions of ``clip.site_names`` and
+        ``fall_geom_heights_m`` the centre heights of the trunk/head geoms.
+        Returns ``(reward, scaled_terms, flags)`` with boolean flags
+        ``fell``, ``tracking_failed``, ``finished`` and their union ``done``.
+        """
+        c = self._config
+        ref_q, ref_v, ref_sites = self.reference_at(t_s)
+        root_pos, root_quat = qpos[0:3], qpos[3:7]
         terms = rewards.deepmimic_terms(
-            joint_pos_rad=data.qpos[7:],
+            joint_pos_rad=qpos[7:],
             ref_joint_pos_rad=ref_q[7:],
-            joint_vel_radps=data.qvel[6:],
+            joint_vel_radps=qvel[6:],
             ref_joint_vel_radps=ref_v[6:],
             root_quat=root_quat,
             ref_root_quat=ref_q[3:7],
             root_pos_m=root_pos,
             ref_root_pos_m=ref_q[0:3],
-            ee_pos_m=data.site_xpos[self._ee_site_ids],
+            ee_pos_m=ee_pos_m,
             ref_ee_pos_m=ref_sites,
             gains={k: c.gains[k] for k in ("pose", "velocity", "end_effector", "root")},
             xp=jp,
         )
-        terms["action_rate"] = rewards.action_rate_cost(
-            action, state.info["last_act"], state.info["last_last_act"], jp
-        )
+        terms["action_rate"] = rewards.action_rate_cost(action, last_act, last_last_act, jp)
         reward, scaled = base.weighted_reward(terms, c.reward_config.scales, self.dt)
-
-        fell = self.fall_geom_min_height(data) < c.fall_height_m
+        fell = jp.min(fall_geom_heights_m) < c.fall_height_m
         failed = rewards.tracking_failed(
             root_pos, ref_q[0:3], root_quat, ref_q[3:7], c.max_root_pos_err_m, c.max_root_angle_err_rad, jp
         )
-        finished = t >= self._episode_end_s
-        done = fell | failed | finished | self.is_invalid(data)
+        finished = t_s >= self._episode_end_s
+        flags = {
+            "fell": fell,
+            "tracking_failed": failed,
+            "finished": finished,
+            "done": fell | failed | finished,
+            "root_pos_err_m": jp.linalg.norm(root_pos - ref_q[0:3]),
+        }
+        return reward, scaled, flags
+
+    def step(self, state: mjx_env.State, action: jax.Array) -> mjx_env.State:
+        data = self.physics_step(state.data, self.motor_targets(state.data.time, action))
+        t = data.time
+        reward, scaled, flags = self.reward_and_termination(
+            data.qpos,
+            data.qvel,
+            data.site_xpos[self._ee_site_ids],
+            data.geom_xpos[self._fall_geom_ids, 2],
+            t,
+            action,
+            state.info["last_act"],
+            state.info["last_last_act"],
+        )
+        done = flags["done"] | self.is_invalid(data)
 
         state.info["last_last_act"] = state.info["last_act"]
         state.info["last_act"] = action
         obs = self.proprio_obs(data, state.info, phase_features(t, self._episode_end_s))
         for k, v in scaled.items():
             state.metrics[f"reward/{k}"] = v
-        state.metrics["root_pos_err_m"] = jp.linalg.norm(root_pos - ref_q[0:3])
-        state.metrics["fell"] = fell.astype(jp.float32)
-        state.metrics["tracking_failed"] = failed.astype(jp.float32)
+        state.metrics["root_pos_err_m"] = flags["root_pos_err_m"]
+        state.metrics["fell"] = flags["fell"].astype(jp.float32)
+        state.metrics["tracking_failed"] = flags["tracking_failed"].astype(jp.float32)
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
