@@ -6,6 +6,8 @@
 #   scripts/run_ws1.sh full  [TASK ...]   # real budgets from humanoid_mimic_rl/configs.py
 # TASK defaults to: walk getup backflip mimic supermimic
 # ("supermimic" = the mimic task trained with train_supermimic.py instead of PPO)
+# G1 flip tasks (Unitree G1, dynamically consistent optimised clip):
+#   g1_backflip g1_mimic g1_supermimic        e.g. scripts/run_ws1.sh smoke g1_backflip g1_mimic g1_supermimic
 #
 # Environment variables:
 #   VENV   python venv to activate          (default: $HOME/.venvs/mjrl)
@@ -57,6 +59,19 @@ else
   echo "WARNING: pytest not installed in $VENV; skipping unit tests (pip install pytest)"
 fi
 
+G1REF="$REPO/data/generated/g1_backflip.npz"
+for task in "${TASKS[@]}"; do
+  if [[ "$task" == g1_* && ! -f "$G1REF" ]]; then
+    echo "== building G1 backflip clip + inverse-dynamics feasibility report $G1REF"
+    opt=()
+    [[ -f "$REPO/humanoid_mimic_rl/data/g1_backflip_solution.json" ]] || opt=(--optimize --workers "$(nproc)")
+    # exits non-zero if the inverse-dynamics feasibility check fails: no training on an infeasible clip
+    python scripts/make_g1_backflip.py --out "$G1REF" "${opt[@]}"
+    python eval_render.py --reference-only "$G1REF" --render-every 2 --playback-speed 0.5
+    break
+  fi
+done
+
 REF="$REPO/data/generated/t1_backflip_keyframed.npz"
 for task in "${TASKS[@]}"; do
   if [[ ( "$task" == mimic || "$task" == supermimic ) && ! -f "$REF" ]]; then
@@ -70,9 +85,12 @@ for task in "${TASKS[@]}"; do
   stamp="$(date +%Y%m%d-%H%M%S)"
   log="$LOGDIR/${PROFILE}_${task}_${stamp}.log"
   echo "== $(date -Is) train $task ($PROFILE) -> $log"
-  if [[ "$task" == supermimic ]]; then
+  if [[ "$task" == supermimic || "$task" == g1_supermimic ]]; then
+    robot=t1
+    [[ "$task" == g1_supermimic ]] && robot=g1
     # shellcheck disable=SC2086
-    python train_supermimic.py --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 | tee "$log"
+    python train_supermimic.py --robot "$robot" --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 \
+      | tee "$log"
   else
     # shellcheck disable=SC2086
     python train.py --task "$task" --profile "$PROFILE" --impl "$IMPL" --logdir "$LOGDIR" $EXTRA 2>&1 | tee "$log"
@@ -80,7 +98,7 @@ for task in "${TASKS[@]}"; do
   run_dir="$(grep -m1 '^run dir: ' "$log" | sed 's/^run dir: //')"
   if [[ "$PROFILE" == smoke ]]; then n_ep=16; else n_ep=128; fi
   speed=1.0
-  [[ "$task" == backflip || "$task" == mimic || "$task" == supermimic ]] && speed=0.5
+  [[ "$task" != walk && "$task" != getup ]] && speed=0.5
   echo "== $(date -Is) eval $task -> $run_dir/eval"
   python eval_render.py --run-dir "$run_dir" --num-episodes "$n_ep" --video-episodes 2 \
     --playback-speed "$speed" 2>&1 | tee -a "$log"

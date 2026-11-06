@@ -11,11 +11,14 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 # Training stack (install on the GPU machine, e.g. pip install "jax[cuda12]" first).
-train = ["playground>=0.2.0", "brax>=0.14.2", "flax", "optax", "mujoco>=3.6.0", "mujoco-mjx>=3.6.0", "mediapy", "imageio-ffmpeg"]
+train = ["playground>=0.2.0", "brax>=0.14.2", "flax", "optax", "scipy", "mujoco>=3.6.0", "mujoco-mjx>=3.6.0", "mediapy", "imageio-ffmpeg"]
 test = ["pytest"]
 
 [tool.setuptools]
 packages = ["humanoid_mimic_rl", "humanoid_mimic_rl.envs", "humanoid_mimic_rl.supermimic"]
+
+[tool.setuptools.package-data]
+humanoid_mimic_rl = ["data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

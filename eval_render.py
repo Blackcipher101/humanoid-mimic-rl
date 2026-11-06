@@ -43,9 +43,10 @@ from brax.training.agents.ppo import checkpoint as ppo_checkpoint  # noqa: E402
 from brax.training.agents.ppo import networks as ppo_networks  # noqa: E402
 from ml_collections import config_dict  # noqa: E402
 from mujoco_playground._src import mjx_env  # noqa: E402
+from mujoco_playground._src.locomotion.g1 import base as g1_base  # noqa: E402
 from mujoco_playground._src.locomotion.t1 import base as t1_base  # noqa: E402
 
-from humanoid_mimic_rl import metrics, reference, t1_model, tasks  # noqa: E402
+from humanoid_mimic_rl import g1_model, metrics, reference, t1_model, tasks  # noqa: E402
 
 GETUP_HOLD_S = 1.0
 FLIP_ROTATION_TOLERANCE_RAD = 0.5  # landing within ~30 deg of a full turn counts
@@ -101,7 +102,10 @@ def write_video(path: Path, frames: list[np.ndarray], step_dt_s: float, render_e
 def render_reference(path: Path, args: argparse.Namespace) -> None:
     clip = reference.load_clip(path)
     mjx_env.ensure_menagerie_exists()
-    scene, assets = t1_model.full_collision_flat_scene(t1_base.get_assets())
+    if clip.joint_names == g1_model.G1_JOINT_NAMES:
+        scene, assets = g1_model.full_collision_flat_scene(g1_base.get_assets())
+    else:
+        scene, assets = t1_model.full_collision_flat_scene(t1_base.get_assets())
     model = mujoco.MjModel.from_xml_string(scene, assets=assets)
     out_dir = args.out_dir or path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +219,7 @@ def rollout(
     return {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
 
 
-def summarize(task: str, tr: dict[str, np.ndarray], dt: float) -> dict[str, float]:
+def summarize(task: str, tr: dict[str, np.ndarray], dt: float, home_height_m: float) -> dict[str, float]:
     if task == "walk":
         return metrics.summarize_walk(tr["reward"], tr["done"], tr["local_linvel"], tr["command"],
                                       tr["up_z"], tr["height_m"], dt, metrics.FallCriteria())
@@ -223,7 +227,7 @@ def summarize(task: str, tr: dict[str, np.ndarray], dt: float) -> dict[str, floa
         return metrics.summarize_getup(tr["reward"], tr["done"], tr["standing"], dt, GETUP_HOLD_S)
     return metrics.summarize_flip(
         tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["height_m"], tr["feet_contact"], dt,
-        FLIP_ROTATION_TOLERANCE_RAD, FLIP_LAND_MIN_UP_Z, FLIP_LAND_HEIGHT_FRAC * t1_model.T1_HOME_ROOT_HEIGHT_M,
+        FLIP_ROTATION_TOLERANCE_RAD, FLIP_LAND_MIN_UP_Z, FLIP_LAND_HEIGHT_FRAC * home_height_m,
     )
 
 
@@ -248,7 +252,8 @@ def main() -> None:
     print(f"task={task} algo={algo} checkpoint={ckpt} episodes={args.num_episodes} steps={steps}", flush=True)
 
     tr = rollout(env, policy, task, args.num_episodes, steps, args.seed, np.asarray(args.walk_command))
-    summary = summarize(task, tr, env.dt)
+    home_height_m = getattr(env, "HOME_ROOT_HEIGHT_M", t1_model.T1_HOME_ROOT_HEIGHT_M)
+    summary = summarize(task, tr, env.dt, home_height_m)
     result = {
         "task": task,
         "algo": algo,

@@ -1,4 +1,4 @@
-"""SuperMimic training loop for ``envs.mimic.T1Mimic`` (JAX / Flax / Optax).
+"""SuperMimic training loop for the DeepMimic task envs (``T1Mimic``, ``G1Mimic``) (JAX / Flax / Optax).
 
 Follows Algorithm A.1 of Liao et al. (arXiv:2610.28480):
 
@@ -17,11 +17,11 @@ Adaptations to this repository (all documented in the README):
   clip phase (as in the PPO ``mimic`` task) instead of 10 future frames;
 * the reward, termination and observation "heads" are **analytic**: they are
   evaluated on the predicted state with differentiable MJX kinematics and the
-  exact functions the simulator env uses (``T1Mimic.reward_and_termination``).
+  exact functions the simulator env uses (``MimicTask.reward_and_termination``).
   The paper allows analytic heads; it learns a soft termination probability,
   here termination is a hard indicator with a stop-gradient (rewards are dense);
 * no domain randomisation, so the world model has no sim-context input;
-* reward = the DeepMimic reward of ``T1Mimic`` (the paper uses BeyondMimic's);
+* reward = the DeepMimic reward of ``MimicTask`` (the paper uses BeyondMimic's);
 * return-based reset sampling is replaced by the env's uniform RSI.
 """
 
@@ -42,9 +42,9 @@ from brax.training.acme import running_statistics
 from flax import struct
 from mujoco import mjx
 
-from humanoid_mimic_rl import metrics, t1_model
+from humanoid_mimic_rl import metrics
 from humanoid_mimic_rl.envs.backflip import phase_features
-from humanoid_mimic_rl.envs.mimic import T1Mimic
+from humanoid_mimic_rl.envs.mimic import MimicTask
 from humanoid_mimic_rl.supermimic import networks
 from humanoid_mimic_rl.supermimic.config import SuperMimicConfig
 from humanoid_mimic_rl.supermimic import state as st
@@ -146,9 +146,9 @@ def _update_stats(stats: RunningStats, x: jax.Array, valid: jax.Array) -> Runnin
 
 
 class SuperMimicTrainer:
-    """Builds and runs the jitted SuperMimic iteration for a ``T1Mimic`` env."""
+    """Builds and runs the jitted SuperMimic iteration for a ``MimicTask`` env (T1 or G1)."""
 
-    def __init__(self, env: T1Mimic, cfg: SuperMimicConfig) -> None:
+    def __init__(self, env: MimicTask, cfg: SuperMimicConfig) -> None:
         cfg.validate()
         self.env = env
         self.cfg = cfg
@@ -509,7 +509,7 @@ class SuperMimicTrainer:
     # Evaluation and checkpoints.
     # ------------------------------------------------------------------
 
-    def make_eval_fn(self, eval_env: T1Mimic) -> Callable[[Any, RunningStats, jax.Array], dict[str, jax.Array]]:
+    def make_eval_fn(self, eval_env: MimicTask) -> Callable[[Any, RunningStats, jax.Array], dict[str, jax.Array]]:
         """Deterministic rollouts of ``num_eval_envs`` episodes in the simulator (no auto-reset)."""
         n, steps = self.cfg.num_eval_envs, int(eval_env.unwrapped._config.episode_length)  # pylint: disable=protected-access
         v_reset, v_step = jax.vmap(eval_env.reset), jax.vmap(eval_env.step)
@@ -547,12 +547,12 @@ class SuperMimicTrainer:
         return out
 
 
-def summarize_eval(traj: dict[str, jax.Array], ctrl_dt_s: float) -> dict[str, float]:
+def summarize_eval(traj: dict[str, jax.Array], ctrl_dt_s: float, home_height_m: float) -> dict[str, float]:
     """Flip metrics (``metrics.summarize_flip``) from an eval rollout, ``(T, N, ...)`` -> per-episode."""
     tr = {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
     return metrics.summarize_flip(
         tr["reward"], tr["done"], tr["qpos"][..., 3:7], tr["up_z"], tr["qpos"][..., 2], tr["feet_contact"],
-        ctrl_dt_s, 0.5, 0.8, 0.75 * t1_model.T1_HOME_ROOT_HEIGHT_M,
+        ctrl_dt_s, 0.5, 0.8, 0.75 * home_height_m,
     )
 
 

@@ -38,6 +38,7 @@ _PACKAGES = ("jax", "jaxlib", "mujoco", "mujoco-mjx", "playground", "brax", "fla
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--robot", default="t1", choices=("t1", "g1"), help="t1: keyframed clip, g1: optimised clip")
     p.add_argument("--profile", default="full", choices=("smoke", "full"))
     p.add_argument("--impl", default="jax", choices=("jax", "warp"), help="MJX backend of the simulator env")
     p.add_argument("--iterations", type=int, default=None, help="override the profile's iteration count")
@@ -69,16 +70,17 @@ def main() -> None:
     cfg.validate()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_dir = (args.logdir / f"mimic-supermimic-{args.profile}-{stamp}").resolve()
+    task = "mimic" if args.robot == "t1" else "g1_mimic"
+    run_dir = (args.logdir / f"{task}-supermimic-{args.profile}-{stamp}").resolve()
     ckpt_dir = run_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=False)
 
-    env = tasks.make_env("mimic", args.impl, cfg.num_envs, args.reference)
-    eval_env = tasks.make_env("mimic", args.impl, cfg.num_eval_envs, args.reference)
+    env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference)
+    eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
     run_config = {
-        "task": "mimic",
+        "task": task,
         "algo": "supermimic",
         "profile": args.profile,
         "impl": args.impl,
@@ -119,7 +121,7 @@ def main() -> None:
             continue
         train_m = _floats(m)
         traj = eval_fn(ts.pi_params, ts.obs_stats, eval_key)
-        ev = sm.summarize_eval(traj, env.dt)
+        ev = sm.summarize_eval(traj, env.dt, env.HOME_ROOT_HEIGHT_M)
         now = time.monotonic()
         it_s = (it - 1) / (now - t_first) if t_first and now > t_first and it > 1 else float("nan")
         eta = (cfg.num_iterations - it) / it_s if it_s == it_s and it_s > 0 else float("nan")

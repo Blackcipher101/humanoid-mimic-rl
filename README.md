@@ -9,6 +9,9 @@ Humanoid policies trained in MuJoCo (MJX) with Brax PPO, with video demos:
 | `backflip` | `humanoid_mimic_rl.envs.backflip.T1Backflip` (new)     | hand-shaped keyframe / phase reward, early termination |
 | `mimic`    | `humanoid_mimic_rl.envs.mimic.T1Mimic` (new)           | DeepMimic: tracking reward + reference state init + early termination |
 | `supermimic` | same `T1Mimic` env                                   | SuperMimic-style: learned world model + backprop through imagined rollouts (`train_supermimic.py`) |
+| `g1_backflip` | `humanoid_mimic_rl.envs.g1_flip.G1Backflip` (new)   | Unitree G1, hand-shaped phase reward, prior = optimised feasible clip |
+| `g1_mimic`  | `humanoid_mimic_rl.envs.g1_flip.G1Mimic` (new)         | Unitree G1, DeepMimic tracking of the optimised clip |
+| `g1_supermimic` | same `G1Mimic` env                                 | SuperMimic-style trainer on G1 (`train_supermimic.py --robot g1`) |
 
 Robot: **Booster T1** (23 actuated joints, ~30 kg) from MuJoCo Playground /
 MuJoCo Menagerie. Playground 0.2.0 ships T1 joystick envs but no humanoid
@@ -122,6 +125,65 @@ Adaptations (single clip, single 16 GB GPU):
   computes sensors before integration); the imagined observation does not.
   The self-check prints the size of this lag; observation noise is larger.
 
+### G1 backflip: dynamically consistent reference (`scripts/make_g1_backflip.py`)
+The T1 flip failed because its keyframed clip was not physically possible.
+Inverse dynamics of that clip needed up to 3.7 kN of root force in flight and
+joint torques up to 11x the T1 limits. The flip tasks therefore moved to the
+**Unitree G1** (playground's 29-DoF model, 33.3 kg) with a clip that is
+dynamically consistent by construction (`humanoid_mimic_rl/flip_opt.py`):
+
+* decision variables: knots of C2 cubic splines for four left/right-symmetric
+  joint groups (hip pitch, knee, ankle pitch, shoulder pitch; everything else
+  at the home pose) and the take-off time;
+* stance: feet flat and fixed; the root pose follows from closed-chain
+  kinematics;
+* flight: the root is **integrated from the take-off state with zero external
+  wrench** under the prescribed joint motion (RK4, 2.5 ms). The CoM is
+  therefore ballistic and the angular momentum about the CoM is conserved by
+  construction;
+* touch-down: the event at which the foot returns to floor height. It must be
+  flat at a pitch of exactly -2*pi with bounded foot speed (small impact,
+  reported); landing stance is anchored there;
+* constraints from inverse dynamics (`flip_dynamics.py`, all constraints
+  disabled so `qfrc_inverse` is the force actuators plus feet must supply):
+  * joint torque <= 85 % of the actuator cap;
+  * per-foot normal force >= 2.5 % of body weight;
+  * friction cone at 80 % of mu = 0.6;
+  * centre of pressure inside 80 % of the sole;
+  * flight clearance of feet and body; joint limits;
+* actuator cap = min(force limit, PD authority `kp * |ctrl limit - q|`). The
+  playground G1 uses position servos, so a joint cannot exceed `kp` times its
+  distance to the control limit. This binds hard for the ankles (kp 20) and
+  the waist;
+* solver: staged bounded least squares, then CMA-ES (derivative-free; the event
+  times make the residual discontinuous), with a continuation on the torque
+  margin.
+
+`flip_dynamics.check_clip` re-checks the exported clip independently, using
+only finite differences of the clip. It reports the in-flight root wrench,
+stance normal force / friction / CoP, and the torque/cap ratio per joint. The
+numbers are in `data/generated/g1_backflip.report.json`. `make_g1_backflip.py`
+exits non-zero when a check fails, so `run_ws1.sh` never trains G1 tasks on an
+infeasible clip.
+
+**Status: no feasible G1 backflip found yet.** The best attempt (laptop, about
+25 min of staged least squares plus 400 CMA-ES generations at torque margin 3.0)
+still failed:
+* it did not touch down within 0.9 s of flight;
+* the waist pitch needed 10x its cap around take-off;
+* the CoP left the sole (2.6x the allowed offset).
+
+Two G1 limits are tighter than the joint force limits suggest:
+* **waist pitch**: 50 N m force limit, PD authority about 39 N m at 0 rad, so about
+  33 N m usable at 85 %. It must accelerate the ~15 kg upper body with the pelvis;
+* **ankle pitch**: kp = 20 with a control range of [-0.87, 0.52] rad. Plantar-flexing
+  push-off authority is only 20*(0.52 - q) N m (about 6 N m at q = 0.2), far below
+  the 50 N m force limit.
+
+Options: longer `--optimize` runs on a many-core machine, letting the waist
+move, or raising the flip envs' ankle/waist `kp`. The last one changes the
+robot model and needs the owner's decision.
+
 ### Reference clip
 No licence-compatible humanoid backflip mocap exists for the T1 (see
 licences), so `scripts/make_reference.py` builds one from the backflip keyframes:
@@ -134,10 +196,28 @@ velocity is discontinuous at take-off (2.5 m/s) and touch-down (2.7 m/s);
 physics and RSI absorb this, as in DeepMimic, but it makes the clip only
 kinematically plausible.
 
+G1 verification (laptop, mujoco 3.17, no JAX):
+* the full-collision G1 compiles; joint order and home pose match; lying on its
+  back it contacts pelvis, torso, shins and hands;
+* on a synthetic biped, the flip-dynamics code is verified for:
+  * static stance wrench and CoP;
+  * free-fall root acceleration;
+  * PD authority caps;
+  * flat, fixed stance feet;
+  * ballistic CoM (acceleration -9.81 m/s^2 to 1e-4);
+  * conserved angular momentum in flight;
+  * `check_clip` reporting near-zero in-flight root wrench for a simulated flight.
+
+The G1 env classes (`envs/g1_full_collision.py`, `envs/g1_flip.py`) and the
+G1 SuperMimic path have never run (no JAX locally).
+
 ## Licences of assets and data
 
 | item | source | licence | status |
 |---|---|---|---|
+| Unitree G1 29-DoF MJX XML (`locomotion/g1/xmls`) | `mujoco_playground` 0.2.0 | Apache-2.0 | OK |
+| Unitree G1 meshes; pelvis/torso/head collider sizes | mujoco_menagerie `unitree_g1` @ `1b86ece5` (`g1_mjx.xml`), Unitree Robotics | BSD-3-Clause (copyright notice retained) | OK |
+| G1 backflip clip | generated by `flip_opt` in this repo | same as this repo | OK |
 | Booster T1 MJCF + meshes | mujoco_menagerie `booster_t1` @ `1b86ece5` (pinned by playground 0.2.0), derived from Booster Robotics' public URDF | Apache-2.0 | OK |
 | T1 MJX XMLs, envs, base classes | `mujoco_playground` 0.2.0 | Apache-2.0 (rock texture CC0, unused here) | OK |
 | Brax | `brax` 0.14.2 | Apache-2.0 | OK |

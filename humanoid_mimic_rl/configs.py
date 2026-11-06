@@ -127,6 +127,18 @@ TASKS: dict[str, TaskSpec] = {
         full=PPOConfig(num_timesteps=150_000_000, num_evals=15),
         smoke=_smoke(),
     ),
+    "g1_backflip": TaskSpec(
+        name="g1_backflip",
+        description="Unitree G1 backflip, hand-shaped reward on the optimised clip (envs.g1_flip.G1Backflip).",
+        full=PPOConfig(num_timesteps=150_000_000, num_evals=15),
+        smoke=_smoke(),
+    ),
+    "g1_mimic": TaskSpec(
+        name="g1_mimic",
+        description="Unitree G1 DeepMimic tracking of the optimised backflip clip (envs.g1_flip.G1Mimic).",
+        full=PPOConfig(num_timesteps=150_000_000, num_evals=15),
+        smoke=_smoke(),
+    ),
 }
 
 
