@@ -1,0 +1,21 @@
+{
+  "task": "getup",
+  "algo": "ppo",
+  "checkpoint": "/home/griffinlabs/humanoid_getup/runs/getup-full-20261106-193858/checkpoints/000100270080",
+  "impl": "jax",
+  "seed": 1,
+  "episode_steps": 400,
+  "ctrl_dt_s": 0.02,
+  "walk_command": null,
+  "metrics": {
+    "num_episodes": 128,
+    "episode_return_mean": 42.56596374511719,
+    "episode_return_std": 5.807017803192139,
+    "episode_length_s_mean": 8.0,
+    "terminated_early_rate": 0.0,
+    "success_rate": 0.9921875,
+    "stood_up_rate": 0.9921875,
+    "fall_rate": 0.0,
+    "time_to_stand_s_median": 1.32
+  }
+}
