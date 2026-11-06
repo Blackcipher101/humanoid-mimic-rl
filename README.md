@@ -152,10 +152,9 @@ dynamically consistent by construction (`humanoid_mimic_rl/flip_opt.py`):
   * friction cone at 80 % of mu = 0.6;
   * centre of pressure inside 80 % of the sole;
   * flight clearance of feet and body; joint limits;
-* actuator cap = min(force limit, PD authority `kp * |ctrl limit - q|`). The
-  playground G1 uses position servos, so a joint cannot exceed `kp` times its
-  distance to the control limit. This binds hard for the ankles (kp 20) and
-  the waist;
+* actuator cap: the peak torque of the flip tasks' torque motors (see
+  "Flip-task actuation" below). For position servos the checker would instead
+  use min(force limit, PD authority `kp * |ctrl limit - q|`);
 * solver: staged bounded least squares, then CMA-ES (derivative-free; the event
   times make the residual discontinuous), with a continuation on the torque
   margin.
@@ -194,36 +193,59 @@ acceleration of roughly 35 rad/s^2 or less). Whether the long CMA-ES search on
 ws1 finds such a motion is open; the clip is exported only if the
 inverse-dynamics check passes.
 
-**Flip-task servo stiffness (owner decision).** The flip tasks
-`g1_backflip`, `g1_mimic` and `g1_supermimic` use `g1_model.FLIP_SERVO_KP`:
-ankle pitch and ankle roll kp go to 40. The optimiser and checker use the same
-model. Force limits are unchanged, and no other task or shared model is
-touched. Sources (both BSD-3-Clause, Unitree Robotics):
+**Flip-task actuation (owner decision): torque motors at the G1 EDU peak torques.**
+The flip tasks `g1_backflip`, `g1_mimic` and `g1_supermimic` replace
+playground's soft position servos with torque motors. In those servos the
+reachable torque, kp x distance to the control limit, is far below the motor
+limits (ankle kp 20 gives ~14 N m against a 50 N m limit). The optimiser and
+the checker use the same actuator model.
 
-* `unitree_rl_gym` @ `276801e`, `legged_gym/envs/g1/g1_config.py`: stiffness `'ankle': 40`;
-* `unitree_sdk2` @ `8e1b927`, `example/g1/low_level/g1_ankle_swing_example.cpp`:
-  Kp ankle pitch/roll 40, waist yaw 60, waist roll/pitch 40.
+* Peak torque = min(model force limit, 120 N m). Source: unitree.com/g1, spec
+  table, G1 EDU "Maximum Torque of Knee Joint: 120 N.m" (G1: 90 N.m). Its
+  footnote says "The maximum torque of the joint motors of the whole machine is
+  different. This is the maximum torque of the largest joint motor among them."
+* Unitree publishes no other per-joint figure, so every other joint keeps the
+  model's force limit (Unitree g1_description effort limits, via playground /
+  Menagerie), capped at 120 N m.
+* Resulting peaks (N m): knee 120 and hip roll 120 (both were 139); hip
+  pitch/yaw 88, ankle pitch/roll 50, waist yaw 88, waist roll/pitch 50,
+  shoulder/elbow/wrist roll 25, wrist pitch/yaw 5 (unchanged).
+* Checker cap = that peak torque (no PD-authority term), with the 0.85 margin.
+* Env actuation (`G1FullCollisionEnv.TORQUE_MODE`): the policy keeps outputting
+  joint position targets. A PD-to-torque layer evaluated every 2 ms physics
+  substep gives `tau = clip(kp (target - q) - kd qd, +-peak)`, with
+  `kp = peak / 0.25 rad` (full torque at 0.25 rad of error), `kd = 0.02 s * kp`,
+  and targets allowed 0.25 rad beyond the joint range. The full peak torque is
+  therefore reachable everywhere, so the checker cap matches the env.
+* Why a PD layer and not raw torque outputs: the residual-on-reference
+  position actions keep the same action space and scale as the PPO/SuperMimic
+  mimic and backflip tasks, which train well in MJX. Raw torque policies
+  usually need far more samples. These kp/kd are a design choice, not
+  Unitree's hardware gains, and are untested in training so far.
+* Earlier attempts (playground servos, then Unitree-sourced ankle kp 40) are
+  superseded. The A/B above showed that the servo caps, not the optimiser, were
+  binding.
 
-The waist stays at playground's kp 75: Unitree's public value (40) is lower,
-and the only higher one, Menagerie's non-MJX `g1.xml` (kp 500 everywhere), is
-marked "needs tuning" there. The waist pitch is instead freed in the optimiser.
+Local trend check for the torque-motor formulation (laptop, take-off least squares
+then 120 CMA-ES generations at margin 2.0, from the initial guess): still
+infeasible. No touchdown within 0.9 s, over-rotation (touchdown pitch -7.5 vs
+-2*pi rad), and the waist pitch is the worst joint at 10.3x its 50 N m peak
+(11.5x with the servo caps at the same budget). Net travel is now within bounds
+(-0.25 m) and the apex rise is lower (0.74 m). A ws1 run of the previous
+formulation (`be24da8`, 12 workers, ~25 min) reached a 4.2x worst torque ratio
+with a full rotation, so the long search is the real test.
 
-Effective torque cap at the home pose, min(force limit, PD authority), N m, +/-:
-
-| joint | kp before -> after | force limit | cap before | cap after |
-|---|---|---|---|---|
-| ankle pitch | 20 -> 40 | 50 | +14.5 / -13.5 | +28.9 / -26.9 |
-| ankle roll | 2 -> 40 | 50 | +0.5 / -0.5 | +10.5 / -10.5 |
-| waist pitch / roll | 75 (unchanged) | 50 | +39 / -39 | +39 / -39 |
-| knee | 75 | 139 | +139 / -29 | unchanged |
-| hip pitch | 75 | 88 | +88 / -88 | unchanged |
-
-Near a joint limit the cap toward that limit falls to kp x distance; for
-example, at 0.2 rad from a limit the ankle cap is 8 N m (it was 4 N m).
-`make_g1_backflip.py` writes the effective caps into the report.
-`--torque-margin` sets both the last optimisation stage and the pass/fail
-check. If 0.85 cannot be reached, report the margin that passed rather than
-loosening it silently.
+Optimiser additions in this round:
+* toe-off: the feet may pivot about the sole's front edge before take-off
+  (heel lift up to 0.6 rad over the last 0.05-0.25 s; the CoP must then stay
+  within 2 cm of the toe edge);
+* the floor CoP is computed on the ground plane against the touching sole
+  region;
+* root apex rise <= 0.5 m above home and net travel <= 0.5 m (a lower, tighter
+  flip; the ws1 run reached a 0.83 m rise and 1.13 m travel);
+* torque-margin continuation 2.0 -> 1.2 -> 0.85, ending at the target 0.85;
+* the clip is exported at 400 Hz, so the checker's finite differences are 4x
+  more accurate than at 200 Hz.
 
 ### Reference clip
 No licence-compatible humanoid backflip mocap exists for the T1 (see

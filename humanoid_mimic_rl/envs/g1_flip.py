@@ -5,8 +5,10 @@
   taken from the optimised clip (``scripts/make_g1_backflip.py``).
 * ``G1Mimic``: DeepMimic tracking (``mimic.MimicTask``) of the same clip.
 
-Both use ``g1_model.FLIP_SERVO_KP`` (ankle kp 40, Unitree's public gains),
-the same model the reference was optimised and checked against.
+Both run in torque mode (``G1FullCollisionEnv.TORQUE_MODE``): torque motors
+limited to the G1 EDU peak torques (``g1_model.flip_peak_torques``) behind a
+PD-to-torque layer, the same actuator limits the reference was optimised and
+checked against.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from pathlib import Path
 import numpy as np
 from ml_collections import config_dict
 
-from humanoid_mimic_rl import g1_model, reference
+from humanoid_mimic_rl import reference
 from humanoid_mimic_rl.envs import backflip, mimic
 from humanoid_mimic_rl.envs.g1_full_collision import G1FullCollisionEnv
 
@@ -49,7 +51,7 @@ def backflip_config(reference_path: str) -> config_dict.ConfigDict:
 class G1Backflip(backflip.BackflipTask, G1FullCollisionEnv):
     """G1 standing backflip, hand-shaped reward, prior from the optimised clip."""
 
-    SERVO_KP_OVERRIDES = g1_model.FLIP_SERVO_KP
+    TORQUE_MODE = True
 
     def _motion_prior(self) -> backflip.MotionPrior:
         clip = reference.load_clip(Path(self._config.reference_path))
@@ -62,4 +64,4 @@ class G1Backflip(backflip.BackflipTask, G1FullCollisionEnv):
 class G1Mimic(mimic.MimicTask, G1FullCollisionEnv):
     """G1 DeepMimic tracking of the optimised backflip clip."""
 
-    SERVO_KP_OVERRIDES = g1_model.FLIP_SERVO_KP
+    TORQUE_MODE = True

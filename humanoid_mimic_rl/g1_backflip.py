@@ -63,10 +63,10 @@ SOURCE = "humanoid_mimic_rl.g1_backflip + flip_opt (ballistic flight, inverse-dy
 
 
 def load_model(assets: Mapping[str, bytes]) -> mujoco.MjModel:
-    """Full-collision G1 with the flip-task servo stiffness (``g1_model.FLIP_SERVO_KP``)."""
+    """Full-collision G1 with the flip tasks' torque motors (``g1_model.flip_peak_torques``)."""
     scene, full_assets = g1_model.full_collision_flat_scene(assets)
     model = mujoco.MjModel.from_xml_string(scene, assets=full_assets)
-    g1_model.apply_servo_kp(model, g1_model.FLIP_SERVO_KP)
+    g1_model.to_torque_motors(model, g1_model.flip_peak_torques(model))
     return model
 
 

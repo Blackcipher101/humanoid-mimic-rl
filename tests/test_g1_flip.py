@@ -152,24 +152,66 @@ def test_actuator_caps_pd_authority(biped):
     assert cap_pos[0] == pytest.approx(200.0)
 
 
-def test_apply_servo_kp_changes_pd_authority(biped):
+def test_torque_motors_cap_is_peak_torque(biped):
     from humanoid_mimic_rl import g1_model
 
-    q = np.array([0.9, 0.9, 0.0, 0.0])
-    g1_model.apply_servo_kp(biped.m, {"l_ankle": 1000.0})
-    a = 1  # actuator driving l_ankle
-    assert biped.m.actuator_gainprm[a, 0] == 1000.0 and biped.m.actuator_biasprm[a, 1] == -1000.0
-    fb2 = type(biped)(biped.m, biped.feet, ["trunk"])  # re-read kp from the model
-    assert fb2.actuator_caps(q)[0][1] == pytest.approx(100.0)  # 1000 * 0.1 = 100 = force limit
-    with pytest.raises(KeyError):
-        g1_model.apply_servo_kp(biped.m, {"nope": 1.0})
+    peak = g1_model.flip_peak_torques(biped.m)
+    np.testing.assert_allclose(peak, [120.0, 100.0, 120.0, 100.0])  # min(force limit, 120 N m)
+    g1_model.to_torque_motors(biped.m, peak)
+    np.testing.assert_allclose(biped.m.actuator_ctrlrange[:, 1], peak)
+    np.testing.assert_allclose(biped.m.jnt_actfrcrange[1:, 1], peak)
+    fb = type(biped)(biped.m, biped.feet, ["trunk"])
+    for q in (np.zeros(4), np.array([1.95, 0.99, -1.95, -0.99])):  # also right at the joint limits
+        cap_pos, cap_neg = fb.actuator_caps(q)
+        np.testing.assert_allclose(cap_pos, peak)
+        np.testing.assert_allclose(cap_neg, peak)
+    with pytest.raises(ValueError):
+        g1_model.to_torque_motors(biped.m, np.zeros(4))
+
+
+def test_torque_motor_applies_ctrl_as_torque(biped):
+    mujoco = pytest.importorskip("mujoco")
+    from humanoid_mimic_rl import g1_model
+
+    m = mujoco.MjModel.from_xml_string(_BIPED)
+    g1_model.to_torque_motors(m, g1_model.flip_peak_torques(m))
+    d = mujoco.MjData(m)
+    mujoco.mj_resetDataKeyframe(m, d, 0)
+    d.ctrl[:] = [50.0, -500.0, 0.0, 0.0]
+    mujoco.mj_forward(m, d)
+    np.testing.assert_allclose(d.actuator_force, [50.0, -100.0, 0.0, 0.0])  # clamped to the peak
+
+
+def test_ground_cop_and_support_region():
+    from humanoid_mimic_rl import flip_dynamics as fd
+
+    centre = np.array([0.1, 0.0, 0.0])
+    w = np.array([0.0, 0.0, 100.0, 0.0, -2.0, 0.0])  # tau_y = -2 N m -> CoP 2 cm ahead
+    np.testing.assert_allclose(fd.ground_cop(centre, w), [0.12, 0.0])
+    corners = np.array([[0.0, -0.03, 0.0], [0.0, 0.03, 0.0], [0.2, -0.03, 0.0], [0.2, 0.03, 0.0]])
+    assert fd.cop_outside_support(np.array([0.12, 0.0]), corners) == 0.0
+    assert fd.cop_outside_support(np.array([0.25, 0.0]), corners) == pytest.approx(0.05)
+    heel_up = corners.copy()
+    heel_up[:2, 2] = 0.05  # heel corners lifted: support is the toe line x = 0.2
+    assert fd.cop_outside_support(np.array([0.12, 0.0]), heel_up) == pytest.approx(0.08)
+
+
+def test_toe_off_pivots_about_the_toe_edge(biped):
+    p = _problem(biped)
+    x = p.pack(np.array([[0.3, 0.2], [-0.4, 0.3], [0.2, -0.2], [0.0, 0.1]]), 0.5, heel_max_rad=0.4, heel_lead_s=0.2)
+    assert p.heel_angle(x, 0.25) == 0.0 and p.heel_angle(x, 0.5) == pytest.approx(0.4)
+    spl = p.joint_spline(x)
+    q, _, _ = p.stance_state(spl, 0.5, p.toe0, lambda t: p.heel_angle(x, t))
+    pos, rot = biped.foot_pose(q, 0)
+    np.testing.assert_allclose(pos + rot @ p.toe_local, p.toe0, atol=1e-9)  # toe edge stays put
+    assert np.arctan2(rot[0, 2], rot[0, 0]) == pytest.approx(0.4)  # heel up = positive foot pitch
 
 
 def test_flight_is_ballistic_and_conserves_angular_momentum(biped):
     p = _problem(biped)
     x = p.pack(np.array([[0.3, 0.2], [-0.8, 0.5], [0.6, -0.4], [-0.2, 0.1]]), 0.5)
     spl = p.joint_spline(x)
-    q0, v0, _ = p.stance_state(spl, 0.5, p.anchor0)
+    q0, v0, _ = p.stance_state(spl, 0.5, p.toe0)
     y0 = np.concatenate([q0[0:3], q0[3:7], v0[0:3] + [0.0, 0.0, 3.0], v0[3:6] + [0.0, -4.0, 0.0]])
     ts, ys, _ = p.flight(spl, 0.5, y0)
     com_v, ang = [], []
@@ -191,7 +233,7 @@ def test_stance_keeps_foot_flat_and_fixed(biped):
     x = p.pack(np.array([[0.3, 0.2], [-0.4, 0.3], [0.2, -0.2], [0.0, 0.1]]), 0.5)
     spl = p.joint_spline(x)
     for t in (0.0, 0.25, 0.45):
-        q, _, _ = p.stance_state(spl, t, p.anchor0)
+        q, _, _ = p.stance_state(spl, t, p.toe0)  # flat foot: toe anchor <=> foot origin at anchor0
         pos, rot = biped.foot_pose(q, 0)
         np.testing.assert_allclose(pos, p.anchor0, atol=1e-9)
         np.testing.assert_allclose(rot, np.eye(3), atol=1e-9)

@@ -38,7 +38,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from humanoid_mimic_rl import flip_dynamics, flip_opt, g1_backflip, g1_model, reference  # noqa: E402
 
 OPT_RATE_HZ = 100.0  # constraint sampling during optimisation
-CLIP_RATE_HZ = 200.0  # exported clip
+CLIP_RATE_HZ = 400.0  # exported clip (finite differences in the checker scale with 1/rate^2)
 TORQUE_MARGIN = 0.85  # default target: torque <= 85 % of min(force limit, PD authority)
 ROOT_FORCE_TOL_FRAC = 0.02  # in-flight root force tolerance, fraction of body weight
 ROOT_TORQUE_TOL_NM = 2.0
@@ -73,13 +73,13 @@ class ProblemFactory:
 
 
 def push_mask(problem: flip_opt.FlipProblem) -> np.ndarray:
-    """Parameters of the push-off knots (0.55-1.1 s) and the take-off time."""
+    """Parameters of the push-off knots (0.55-1.1 s), the toe-off (heel lift) and the take-off time."""
     push = np.zeros(problem.s.num_params, dtype=bool)
     for t_knot in (0.55, 0.75, 0.9, 1.0, 1.1):
         k = int(np.argmin(np.abs(problem.s.knot_times_s - t_knot)))
         for group in problem.s.groups:
             push[problem.knot_param_index(k, group)] = True
-    push[-1] = True
+    push[-3:] = True  # heel_max, heel_lead, takeoff
     return push
 
 
@@ -87,13 +87,14 @@ def optimise(
     factory: ProblemFactory, x0: np.ndarray, workers: int, generations: int, torque_margin: float
 ) -> np.ndarray:
     """Push-off least squares (take-off momentum targets), then CMA-ES with the torque
-    margin tightened 3.0 -> 1.5 -> ``torque_margin`` (derivative-free: the event times
-    make the residual discontinuous), then a least-squares polish of all parameters."""
+    margin tightened 2.0 -> 1.2 -> ``torque_margin`` (derivative-free: the event times
+    make the residual discontinuous), then a least-squares polish of all parameters at
+    ``torque_margin``. Apex-rise / travel limits and touchdown bounds apply throughout."""
     log = lambda s: print(s, flush=True)  # noqa: E731
     problem = factory()
-    x = flip_opt.solve_staged(factory, x0, [("takeoff@3.0", push_mask(problem), 600)], workers, log)
+    x = flip_opt.solve_staged(factory, x0, [("takeoff@2.0", push_mask(problem), 600)], workers, log)
     sigma = 0.05
-    for margin in (3.0, 1.5, torque_margin):
+    for margin in (2.0, 1.2, torque_margin):
         stage = f"full@{margin}"
         x = flip_opt.cmaes(factory, x, stage, sigma, generations, workers, log, popsize=2 * workers)
         sigma *= 0.5
@@ -102,7 +103,8 @@ def optimise(
 
 
 def effective_caps(fb: flip_dynamics.FloatingBaseModel) -> dict[str, list[float]]:
-    """[positive, negative] torque cap (N m) per joint at the home pose: min(force limit, PD authority)."""
+    """[positive, negative] torque cap (N m) per joint at the home pose used by the checker
+    (torque motors: the peak torque; servos would add their PD authority)."""
     pos, neg = fb.actuator_caps(fb.m.keyframe("home").qpos[7:])
     return {name: [float(a), float(b)] for name, a, b in zip(g1_model.G1_JOINT_NAMES, pos, neg)}
 
@@ -168,7 +170,9 @@ def main() -> int:
         "root_displacement_x_m": float(clip.qpos[-1, 0] - clip.qpos[0, 0]),
         "apex_root_height_m": float(np.max(clip.qpos[:, 2])),
         "optimiser_constraint_violations": violations,
-        "servo_kp_overrides": g1_model.FLIP_SERVO_KP,
+        "actuation": "torque motors, peak = min(model force limit, G1 EDU 120 N m); see g1_model",
+        "heel_lift_rad": float(x[-3]),
+        "heel_lift_lead_s": float(x[-2]),
         "effective_torque_cap_at_home_nm": effective_caps(fb),
         "check": dataclasses.asdict(report),
         "check_thresholds": {

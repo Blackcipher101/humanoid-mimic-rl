@@ -134,35 +134,63 @@ def full_collision_flat_scene(assets: Mapping[str, bytes]) -> tuple[str, dict[st
 
 
 # ----------------------------------------------------------------------
-# Servo stiffness for the FLIP tasks only (g1_backflip / g1_mimic / g1_supermimic).
-# Playground's G1 uses kp 20 (ankle pitch) and kp 2 (ankle roll); with position
-# servos the reachable torque is kp * |ctrl limit - q|, so a plantar-flexed ankle
-# can only push with a few N m although its force limit is 50 N m.
-# Values from Unitree's public G1 gains (both BSD-3-Clause, Unitree Robotics):
-#   * unitree_rl_gym @ 276801e, legged_gym/envs/g1/g1_config.py: stiffness 'ankle': 40
-#   * unitree_sdk2 @ 8e1b927, example/g1/low_level/g1_ankle_swing_example.cpp:
-#     Kp ankle pitch/roll 40, waist yaw 60, waist roll/pitch 40
-# Waist: playground's kp 75 is already above Unitree's public 40, so it is kept.
-# (Menagerie's non-MJX g1.xml uses kp 500 everywhere but marks the actuators
-# "needs tuning", so it is not used as evidence.) Force limits are unchanged.
+# FLIP tasks only (g1_backflip / g1_mimic / g1_supermimic): torque motors limited
+# to the real G1 EDU peak torques instead of playground's soft position servos
+# (whose reachable torque kp * |ctrl limit - q| is far below the motor limits).
+#
+# Source: unitree.com/g1 spec table, G1 EDU "Maximum Torque of Knee Joint: 120 N.m"
+# (G1 base: 90 N.m), footnote [1]: "The maximum torque of the joint motors of the
+# whole machine is different. This is the maximum torque of the largest joint
+# motor among them." Unitree publishes no other per-joint figure, so every joint
+# keeps the model's force limit (Unitree g1_description effort limits, via
+# playground / Menagerie), capped at that 120 N m. Effect: knee and hip roll
+# 139 -> 120 N m; all other joints unchanged (hip pitch/yaw 88, ankle 50, waist
+# yaw 88, waist roll/pitch 50, shoulder/elbow/wrist roll 25, wrist pitch/yaw 5).
 # ----------------------------------------------------------------------
-FLIP_SERVO_KP: dict[str, float] = {
-    "left_ankle_pitch_joint": 40.0,
-    "right_ankle_pitch_joint": 40.0,
-    "left_ankle_roll_joint": 40.0,
-    "right_ankle_roll_joint": 40.0,
-}
+G1_EDU_MAX_JOINT_TORQUE_NM = 120.0
+
+# PD-to-torque layer of the flip envs (a design choice, not Unitree gains):
+# full peak torque at FLIP_PD_FULL_TORQUE_ERROR_RAD of position error, damping
+# kd = FLIP_PD_KD_PER_KP * kp, targets may exceed the joint range by
+# FLIP_PD_TARGET_SLACK_RAD so the full peak torque is reachable at the limits
+# (the dynamics checker's cap is then exactly the peak torque).
+FLIP_PD_FULL_TORQUE_ERROR_RAD = 0.25
+FLIP_PD_KD_PER_KP = 0.02  # s
+FLIP_PD_TARGET_SLACK_RAD = 0.25
 
 
-def apply_servo_kp(model: object, kp_by_joint: Mapping[str, float]) -> None:
-    """Set position-servo stiffness of ``mujoco.MjModel`` actuators driving the named joints.
+def flip_peak_torques(model: object) -> np.ndarray:
+    """Per-actuator peak torque (N m) for the flip tasks: min(model force limit, 120 N m)."""
+    jnt = model.actuator_trnid[:, 0]
+    model_limit = np.max(np.abs(model.jnt_actfrcrange[jnt]), axis=1)
+    return np.minimum(model_limit, G1_EDU_MAX_JOINT_TORQUE_NM)
 
-    MuJoCo position actuators compute ``kp * ctrl - kp * q - kv * qd``: gain
-    ``gainprm[0] = kp`` and bias ``biasprm[1] = -kp``; both are updated so the
-    servo stays consistent. Raises ``KeyError`` for unknown joints.
+
+def flip_pd_gains(peak_nm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(kp N m/rad, kd N m s/rad)`` of the flip envs' PD-to-torque layer."""
+    kp = np.asarray(peak_nm) / FLIP_PD_FULL_TORQUE_ERROR_RAD
+    return kp, FLIP_PD_KD_PER_KP * kp
+
+
+def to_torque_motors(model: object, peak_nm: np.ndarray) -> None:
+    """Replace every actuator of a ``mujoco.MjModel`` by a torque motor limited to ``peak_nm``.
+
+    Motor: gain type fixed with gain 1, no bias, ``ctrlrange = [-peak, peak]``;
+    the joints' ``actuatorfrcrange`` is set to the same peak so MuJoCo enforces it.
     """
-    joint_of_actuator = {model.joint(int(model.actuator_trnid[a, 0])).name: a for a in range(model.nu)}
-    for name, kp in kp_by_joint.items():
-        a = joint_of_actuator[name]
-        model.actuator_gainprm[a, 0] = kp
-        model.actuator_biasprm[a, 1] = -kp
+    import mujoco  # noqa: PLC0415  (keeps this module importable without mujoco)
+
+    peak = np.asarray(peak_nm, dtype=np.float64)
+    if peak.shape != (model.nu,) or np.any(peak <= 0):
+        raise ValueError(f"need {model.nu} positive peak torques")
+    for a in range(model.nu):
+        model.actuator_gaintype[a] = mujoco.mjtGain.mjGAIN_FIXED
+        model.actuator_biastype[a] = mujoco.mjtBias.mjBIAS_NONE
+        model.actuator_gainprm[a, :] = 0.0
+        model.actuator_gainprm[a, 0] = 1.0
+        model.actuator_biasprm[a, :] = 0.0
+        model.actuator_ctrllimited[a] = 1
+        model.actuator_ctrlrange[a] = (-peak[a], peak[a])
+        j = model.actuator_trnid[a, 0]
+        model.jnt_actfrclimited[j] = 1
+        model.jnt_actfrcrange[j] = (-peak[a], peak[a])
