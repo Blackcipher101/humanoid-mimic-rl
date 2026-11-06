@@ -30,6 +30,26 @@ def test_height_reward_saturates():
     np.testing.assert_allclose(rewards.height_reward(np.array([0.0, 0.33, 1.0]), 0.66, np), [0, 0.5, 1])
 
 
+def test_tall_upright_removes_sitting_plateau():
+    # sitting upright (torso vertical, half height) must score far below standing, unlike upright_reward alone
+    sit = rewards.tall_upright_reward(1.0, 0.33, 0.66, np)
+    stand = rewards.tall_upright_reward(1.0, 0.66, 0.66, np)
+    lying = rewards.tall_upright_reward(0.0, 0.15, 0.66, np)
+    assert stand == 1.0 and sit == 0.25 and lying < sit
+    assert rewards.upright_reward(1.0, np) == 1.0  # the old term paid sitting fully
+
+
+def test_feet_under_torso_reward():
+    torso = np.array([0.0, 0.0])
+    under = np.array([[0.05, 0.1], [-0.05, -0.1]])
+    far = np.array([[0.6, 0.1], [0.5, -0.1]])
+    assert rewards.feet_under_torso_reward(torso, under, 0.25, np) == 1.0
+    r_far = rewards.feet_under_torso_reward(torso, far, 0.25, np)
+    np.testing.assert_allclose(r_far, np.exp(-(0.55 / 0.25) ** 2))
+    batch = rewards.feet_under_torso_reward(np.zeros((3, 2)), np.stack([under, far, under]), 0.25, np)
+    assert batch.shape == (3,)
+
+
 def test_standing_gate():
     up = np.array([0.95, 0.95, 0.5])
     h = np.array([0.7, 0.3, 0.7])
