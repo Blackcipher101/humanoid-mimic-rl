@@ -337,6 +337,10 @@ def test_resolve_torque_scale_from_clip_report(tmp_path):
     report.write_text(json.dumps({"torque_scale": 4.0, "passed": False}))
     with pytest.raises(ValueError, match="FAILED"):
         g1_model.resolve_torque_scale(clip, None)
+    # explicit opt-in: accepted, still at the recorded scale (no silent strengthening), and still checks a request
+    assert g1_model.resolve_torque_scale(clip, None, allow_infeasible=True) == 4.0
+    with pytest.raises(ValueError, match="!="):
+        g1_model.resolve_torque_scale(clip, 3.0, allow_infeasible=True)
 
 
 def test_check_clip_guards_vanishing_normal_force(biped):
