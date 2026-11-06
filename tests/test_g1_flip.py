@@ -25,6 +25,8 @@ _G1_SNIPPET = """
       <geom name="right_shin" class="collision" type="capsule" size="0.06" fromto="0 0 0 0 0 -0.2"/>
       <geom name="left_hand_collision" class="collision" type="capsule" size="0.05" fromto="0 0 0 0 0 -0.2"/>
       <geom name="right_hand_collision" class="collision" type="capsule" size="0.05" fromto="0 0 0 0 0 -0.2"/>
+      <geom name="left_foot" class="foot" type="box" size="0.09 0.03 0.008"/>
+      <geom name="right_foot" class="foot" type="box" size="0.09 0.03 0.008"/>
       <body name="torso_link"/>
     </body>
   </worldbody>
@@ -41,6 +43,8 @@ def test_full_collision_patch_adds_colliders_and_floor_pairs():
     pairs = [p for p in root.iter("pair") if p.get("geom2") == "floor"]
     assert {p.get("geom1") for p in pairs} == set(g1_model.FLOOR_PAIR_GEOMS)
     assert all(p.get("condim") == "3" for p in pairs)
+    self_pairs = {(p.get("geom1"), p.get("geom2")) for p in root.iter("pair") if p.get("name", "").startswith("self_")}
+    assert self_pairs == set(g1_model.SELF_COLLISION_PAIRS)
     with pytest.raises(ValueError, match="already has"):
         g1_model.make_full_collision_xml(ET.tostring(root, encoding="unicode"))
 
@@ -277,7 +281,7 @@ def test_real_g1_full_collision_model():
     m = mujoco.MjModel.from_xml_string(scene, assets=assets)
     assert tuple(m.joint(i).name for i in range(1, m.njnt)) == g1_model.G1_JOINT_NAMES
     np.testing.assert_allclose(m.keyframe("home").qpos[7:], g1_model.home_pose())
-    assert m.npair == 5 + len(g1_model.FLOOR_PAIR_GEOMS)
+    assert m.npair == 5 + len(g1_model.FLOOR_PAIR_GEOMS) + len(g1_model.SELF_COLLISION_PAIRS)
     d = mujoco.MjData(m)
     mujoco.mj_resetDataKeyframe(m, d, 0)
     d.qpos[2] = 0.3
@@ -364,3 +368,35 @@ def test_check_clip_guards_vanishing_normal_force(biped):
     assert np.isfinite(rep.stance_max_friction_ratio) and np.isfinite(rep.stance_max_cop_outside_m)
     assert not rep.passes(0.85, 0.6, 1e9, 1e9)
     json.dumps(dataclasses.asdict(rep), allow_nan=False)  # report is valid JSON (no inf / NaN)
+
+
+def test_full_collision_xml_has_self_collision_pairs():
+    """Self-collision is on: every SELF_COLLISION_PAIRS entry becomes a <pair>, none overlaps at the home pose."""
+    import os
+    import xml.etree.ElementTree as ET
+
+    from humanoid_mimic_rl import g1_model
+
+    xml_dir, mesh_dir = os.environ.get("G1_XML_DIR"), os.environ.get("G1_MESH_DIR")
+    if not xml_dir or not mesh_dir:
+        pytest.skip("G1_XML_DIR / G1_MESH_DIR not set")
+    mujoco = pytest.importorskip("mujoco")
+    assets = {}
+    for d in (xml_dir, mesh_dir):
+        for f in os.listdir(d):
+            p = os.path.join(d, f)
+            if os.path.isfile(p):
+                assets[f] = open(p, "rb").read()
+    robot = g1_model.make_full_collision_xml(assets[g1_model.ROBOT_XML_NAME].decode("utf-8"))
+    pairs = {(p.get("geom1"), p.get("geom2")) for p in ET.fromstring(robot).iter("pair")}
+    assert set(g1_model.SELF_COLLISION_PAIRS) <= pairs
+    scene, a = g1_model.full_collision_flat_scene(assets)
+    m = mujoco.MjModel.from_xml_string(scene, a)
+    d = mujoco.MjData(m)
+    d.qpos[2] = g1_model.G1_HOME_ROOT_HEIGHT_M
+    d.qpos[3] = 1.0
+    d.qpos[7:] = g1_model.home_pose()
+    mujoco.mj_forward(m, d)
+    self_contacts = [i for i in range(d.ncon) if m.geom(d.contact.geom1[i]).name != "floor"
+                     and m.geom(d.contact.geom2[i]).name != "floor"]
+    assert not self_contacts, "self-collision pairs touch at the home pose"
