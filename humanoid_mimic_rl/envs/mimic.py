@@ -76,22 +76,29 @@ def episode_length_for(clip: reference.ReferenceClip, ctrl_dt_s: float, hold_fin
     return int(math.ceil((clip.duration_s + hold_final_s) / ctrl_dt_s))
 
 
-class T1Mimic(base.T1FullCollisionEnv):
-    """Track ``config.reference_path`` with DeepMimic reward, RSI and ET."""
+class MimicTask:
+    """Robot-agnostic DeepMimic task; combine with a full-collision robot env.
+
+    The concrete class must inherit from a robot base env (``T1FullCollisionEnv``
+    or ``G1FullCollisionEnv``) and define ``JOINT_NAMES`` / ``END_EFFECTOR_SITES``.
+    """
+
+    JOINT_NAMES: tuple[str, ...]
+    END_EFFECTOR_SITES: tuple[str, ...]
 
     def __init__(
         self,
         config: config_dict.ConfigDict | None = None,
         config_overrides: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(config or default_config(), config_overrides)
+        super().__init__(config or default_config(), config_overrides)  # type: ignore[call-arg]
         if not self._config.reference_path:
-            raise ValueError("T1Mimic requires config.reference_path")
+            raise ValueError(f"{type(self).__name__} requires config.reference_path")
         clip = reference.load_clip(Path(self._config.reference_path))
-        if clip.joint_names != t1_model.T1_JOINT_NAMES:
-            raise ValueError("reference joint order does not match the T1 model")
-        if clip.site_names != t1_model.T1_END_EFFECTOR_SITES:
-            raise ValueError(f"reference sites {clip.site_names} != {t1_model.T1_END_EFFECTOR_SITES}")
+        if clip.joint_names != self.JOINT_NAMES:
+            raise ValueError(f"reference joint order does not match the {type(self).__name__} robot")
+        if clip.site_names != self.END_EFFECTOR_SITES:
+            raise ValueError(f"reference sites {clip.site_names} != {self.END_EFFECTOR_SITES}")
         self._clip = clip
         self._ref_qpos = jp.array(clip.qpos)
         self._ref_qvel = jp.array(clip.qvel)
@@ -222,3 +229,11 @@ class T1Mimic(base.T1FullCollisionEnv):
         state.metrics["fell"] = flags["fell"].astype(jp.float32)
         state.metrics["tracking_failed"] = flags["tracking_failed"].astype(jp.float32)
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
+
+
+class T1Mimic(MimicTask, base.T1FullCollisionEnv):
+    """DeepMimic tracking on the Booster T1."""
+
+    HOME_ROOT_HEIGHT_M = t1_model.T1_HOME_ROOT_HEIGHT_M
+    JOINT_NAMES = t1_model.T1_JOINT_NAMES
+    END_EFFECTOR_SITES = t1_model.T1_END_EFFECTOR_SITES

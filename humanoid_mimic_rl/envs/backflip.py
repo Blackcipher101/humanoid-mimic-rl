@@ -25,6 +25,7 @@ auto-reset restores together with the initial state.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Any
 
@@ -97,32 +98,48 @@ def phase_features(t_s: jax.Array, period_s: float) -> jax.Array:
     return jp.stack([phase, jp.sin(2.0 * jp.pi * phase), jp.cos(2.0 * jp.pi * phase)])
 
 
-class T1Backflip(base.T1FullCollisionEnv):
-    """Standing backflip on flat ground."""
+@dataclasses.dataclass(frozen=True)
+class MotionPrior:
+    """Feed-forward joint trajectory and root pitch with its flight window."""
+
+    rate_hz: float
+    joint_pos_rad: np.ndarray  # (T, nu)
+    pitch_rad: np.ndarray  # (T,) unwrapped, negative = backwards
+    takeoff_s: float
+    landing_s: float
+
+    @property
+    def end_s(self) -> float:
+        return (self.joint_pos_rad.shape[0] - 1) / self.rate_hz
+
+
+class BackflipTask:
+    """Robot-agnostic backflip task; combine with a full-collision robot env and
+    implement ``_motion_prior``. ``HOME_ROOT_HEIGHT_M`` scales the landing height."""
+
+    HOME_ROOT_HEIGHT_M: float
 
     def __init__(
         self,
         config: config_dict.ConfigDict | None = None,
         config_overrides: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(config or default_config(), config_overrides)
-        keys = kf.t1_backflip_keyframes()
-        kf.validate_keyframes(keys, t1_model.T1_JOINT_NAMES, t1_model.joint_ranges())
-        traj = kf.interpolate_keyframes(
-            keys, t1_model.T1_JOINT_NAMES, t1_model.home_pose(), self._config.keyframe_rate_hz
-        )
-        self._kf_rate_hz = float(self._config.keyframe_rate_hz)
-        self._kf_joints = jp.array(traj.joint_pos_rad)
-        self._kf_pitch = jp.array(traj.pitch_rad)
-        self._motion_end_s = float(traj.times_s[-1])
-        flight = kf.flight_phase(keys)
+        super().__init__(config or default_config(), config_overrides)  # type: ignore[call-arg]
+        prior = self._motion_prior()
+        self._kf_rate_hz = float(prior.rate_hz)
+        self._kf_joints = jp.array(prior.joint_pos_rad)
+        self._kf_pitch = jp.array(prior.pitch_rad)
+        self._motion_end_s = prior.end_s
         c = self._config
-        self._win_pushoff = (flight.takeoff_s - c.pushoff_lead_s, flight.takeoff_s + c.airborne_margin_s)
-        self._win_rotate = (flight.takeoff_s - 0.1, flight.landing_s)
-        self._win_airborne = (flight.takeoff_s + c.airborne_margin_s, flight.landing_s - c.airborne_margin_s)
-        self._win_landing = (flight.landing_s + c.landing_delay_s, np.inf)
-        self._win_settle = (flight.landing_s + c.settle_delay_s, np.inf)
-        self._land_height_m = c.land_height_frac * t1_model.T1_HOME_ROOT_HEIGHT_M
+        self._win_pushoff = (prior.takeoff_s - c.pushoff_lead_s, prior.takeoff_s + c.airborne_margin_s)
+        self._win_rotate = (prior.takeoff_s - 0.1, prior.landing_s)
+        self._win_airborne = (prior.takeoff_s + c.airborne_margin_s, prior.landing_s - c.airborne_margin_s)
+        self._win_landing = (prior.landing_s + c.landing_delay_s, np.inf)
+        self._win_settle = (prior.landing_s + c.settle_delay_s, np.inf)
+        self._land_height_m = c.land_height_frac * self.HOME_ROOT_HEIGHT_M
+
+    def _motion_prior(self) -> MotionPrior:
+        raise NotImplementedError
 
     @property
     def motion_end_s(self) -> float:
@@ -204,3 +221,17 @@ class T1Backflip(base.T1FullCollisionEnv):
             state.metrics[f"reward/{k}"] = v
         state.metrics["fell"] = fell.astype(jp.float32)
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
+
+
+class T1Backflip(BackflipTask, base.T1FullCollisionEnv):
+    """Booster T1: prior from the hand-authored keyframes (``keyframes.t1_backflip_keyframes``)."""
+
+    HOME_ROOT_HEIGHT_M = t1_model.T1_HOME_ROOT_HEIGHT_M
+
+    def _motion_prior(self) -> MotionPrior:
+        keys = kf.t1_backflip_keyframes()
+        kf.validate_keyframes(keys, t1_model.T1_JOINT_NAMES, t1_model.joint_ranges())
+        rate = float(self._config.keyframe_rate_hz)
+        traj = kf.interpolate_keyframes(keys, t1_model.T1_JOINT_NAMES, t1_model.home_pose(), rate)
+        flight = kf.flight_phase(keys)
+        return MotionPrior(rate, traj.joint_pos_rad, traj.pitch_rad, flight.takeoff_s, flight.landing_s)

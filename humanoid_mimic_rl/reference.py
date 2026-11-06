@@ -10,6 +10,8 @@ sampled at a fixed rate:
   the **body** frame (rad/s), then joint velocities (rad/s);
 * ``site_pos``: optional ``(T, n_sites, 3)`` world positions (m) of tracked
   end-effector sites, produced by forward kinematics;
+* ``foot_contact``: optional ``(T,)`` bool, feet on the ground (used by
+  dynamically generated clips; empty when unknown);
 * ``licence`` / ``source``: provenance strings. Loading refuses clips without
   a licence string so unlicensed data cannot slip into training silently.
 
@@ -51,6 +53,7 @@ class ReferenceClip:
     site_pos: np.ndarray
     licence: str
     source: str
+    foot_contact: np.ndarray = dataclasses.field(default_factory=lambda: np.zeros(0, dtype=bool))
 
     @property
     def num_frames(self) -> int:
@@ -89,6 +92,8 @@ class ReferenceClip:
             raise ClipError(
                 f"root quaternion norm deviates from 1 by {np.max(np.abs(qn - 1.0)):.2e}"
             )
+        if self.foot_contact.size not in (0, self.num_frames) or self.foot_contact.ndim != 1:
+            raise ClipError(f"foot_contact shape {self.foot_contact.shape} != ({self.num_frames},)")
         if not self.licence.strip():
             raise ClipError("clip has no licence string; refusing to use it")
 
@@ -134,6 +139,7 @@ def save_clip(path: Path, clip: ReferenceClip) -> None:
         site_pos=clip.site_pos.astype(np.float64),
         licence=np.array(clip.licence),
         source=np.array(clip.source),
+        foot_contact=np.asarray(clip.foot_contact, dtype=bool),
     )
 
 
@@ -155,6 +161,9 @@ def load_clip(path: Path) -> ReferenceClip:
             site_pos=np.asarray(data["site_pos"], dtype=np.float64),
             licence=str(data["licence"]),
             source=str(data["source"]),
+            foot_contact=np.asarray(data["foot_contact"], dtype=bool)
+            if "foot_contact" in data.files
+            else np.zeros(0, dtype=bool),
         )
     clip.validate()
     return clip

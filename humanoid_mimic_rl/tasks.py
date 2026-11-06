@@ -8,14 +8,15 @@ from mujoco_playground import registry
 from mujoco_playground._src import mjx_env
 
 from humanoid_mimic_rl import reference
-from humanoid_mimic_rl.envs import backflip, getup, mimic
+from humanoid_mimic_rl.envs import backflip, g1_flip, getup, mimic
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WALK_ENV_NAME = "T1JoystickFlatTerrain"
 DEFAULT_REFERENCE_PATH = REPO_ROOT / "data" / "generated" / "t1_backflip_keyframed.npz"
+G1_REFERENCE_PATH = REPO_ROOT / "data" / "generated" / "g1_backflip.npz"
 
-# Upper bound on simultaneous contacts per world for the full-collision T1
-# (13 were measured lying on the back with the C MuJoCo engine; 32 leaves margin).
+# Upper bound on simultaneous contacts per world for the full-collision T1 / G1
+# (13 / 6 were measured lying on the back with the C MuJoCo engine; 32 leaves margin).
 # Only used by the MJX "warp" implementation, which preallocates contacts.
 CONTACTS_PER_WORLD = 32
 
@@ -34,7 +35,8 @@ def make_env(
       impl: MJX implementation, ``"jax"`` or ``"warp"``.
       num_worlds: number of parallel environments this instance will be
         vmapped over (sizes the warp contact buffer).
-      reference_path: clip for ``mimic`` (default ``DEFAULT_REFERENCE_PATH``).
+      reference_path: clip for ``mimic`` (default ``DEFAULT_REFERENCE_PATH``) or for
+        ``g1_backflip`` / ``g1_mimic`` (default ``G1_REFERENCE_PATH``).
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. Observation noise is kept in all tasks.
     """
@@ -61,6 +63,15 @@ def make_env(
         overrides["reference_path"] = str(path)
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, cfg.hold_final_s)
         return mimic.T1Mimic(cfg, overrides)
+    if task in ("g1_backflip", "g1_mimic"):
+        path = (reference_path or G1_REFERENCE_PATH).resolve()
+        if task == "g1_backflip":
+            return g1_flip.G1Backflip(g1_flip.backflip_config(str(path)), overrides)
+        cfg = mimic.default_config()
+        clip = reference.load_clip(path)
+        overrides["reference_path"] = str(path)
+        overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, cfg.hold_final_s)
+        return g1_flip.G1Mimic(cfg, overrides)
     raise ValueError(f"unknown task {task!r}")
 
 
