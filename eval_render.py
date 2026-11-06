@@ -37,7 +37,11 @@ import jax.numpy as jp  # noqa: E402
 import mediapy  # noqa: E402
 import mujoco  # noqa: E402
 import numpy as np  # noqa: E402
+from brax.training import checkpoint as brax_checkpoint  # noqa: E402
+from brax.training import networks as brax_networks  # noqa: E402
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint  # noqa: E402
+from brax.training.agents.ppo import networks as ppo_networks  # noqa: E402
+from ml_collections import config_dict  # noqa: E402
 from mujoco_playground._src import mjx_env  # noqa: E402
 from mujoco_playground._src.locomotion.t1 import base as t1_base  # noqa: E402
 
@@ -124,7 +128,31 @@ def load_policy(run_dir: Path, ckpt: Path, algo: str) -> Callable[..., Any]:
         from humanoid_mimic_rl.supermimic import trainer as sm  # pylint: disable=import-outside-toplevel
 
         return sm.load_policy(ckpt, run_dir / "run_config.json")
-    return ppo_checkpoint.load_policy(ckpt, deterministic=True)
+    return _load_ppo_policy(ckpt)
+
+
+_KERNEL_INIT_KEYS = ("policy_network_kernel_init_fn", "value_network_kernel_init_fn", "mean_kernel_init_fn")
+
+
+def _load_ppo_policy(ckpt: Path) -> Callable[..., Any]:
+    """brax 0.14.2 ppo_checkpoint.load_policy, except that unset (null) initialiser names are dropped.
+
+    brax saves e.g. `"mean_kernel_init_fn": null` and its own load_config then fails on KERNEL_INITIALIZER[None];
+    dropping the key lets make_ppo_networks use its default, which is what training used.
+    """
+    cfg = json.loads((ckpt / "ppo_network_config.json").read_text())
+    kw = cfg["network_factory_kwargs"]
+    if "activation" in kw:
+        kw["activation"] = brax_networks.ACTIVATION[kw["activation"]]
+    for key in _KERNEL_INIT_KEYS:
+        if key in kw:
+            if kw[key] is None:
+                del kw[key]
+            else:
+                kw[key] = brax_networks.KERNEL_INITIALIZER[kw[key]]
+    network = brax_checkpoint.get_network(config_dict.create(**cfg), ppo_networks.make_ppo_networks)
+    params = ppo_checkpoint.load(ckpt)
+    return ppo_networks.make_inference_fn(network)(params, deterministic=True)
 
 
 def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, jax.Array]]:
