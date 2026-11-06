@@ -1,0 +1,27 @@
+{
+  "task": "walk",
+  "algo": "ppo",
+  "checkpoint": "/home/griffinlabs/humanoid-mimic-rl/runs/walk-full-20261106-125406/checkpoints/000151388160",
+  "impl": "jax",
+  "seed": 1,
+  "episode_steps": 1000,
+  "ctrl_dt_s": 0.02,
+  "walk_command": [
+    0.5,
+    0.0,
+    0.0
+  ],
+  "metrics": {
+    "num_episodes": 128,
+    "episode_return_mean": 46.561553955078125,
+    "episode_return_std": 0.2520483732223511,
+    "episode_length_s_mean": 20.0,
+    "terminated_early_rate": 0.0,
+    "fall_rate": 0.0,
+    "success_rate": 1.0,
+    "forward_speed_abs_error_mps": 0.05170127508044243,
+    "planar_velocity_error_mps": 0.09915752005577089,
+    "forward_speed_mean_mps": 0.4656662421226502,
+    "commanded_forward_speed_mps": 0.5
+  }
+}

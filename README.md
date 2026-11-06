@@ -15,8 +15,13 @@ MuJoCo Menagerie. Playground 0.2.0 ships T1 joystick envs but no humanoid
 get-up or backflip, so those are added here on top of playground's T1 model
 and base class.
 
-**Status: code only. Nothing in this repository has been trained or run on a
-GPU yet.** See "What was verified" below.
+![Booster T1 walking forward with the trained PPO policy](docs/media/walk_full.gif)
+
+*Trained walk policy, 0.5 m/s forward command ([mp4](docs/media/walk_full.mp4)).*
+
+**Status:** `walk` is trained and evaluated: 128 episodes of 20 s, 0 falls, 100 % success, 0.47 m/s against a 0.5 m/s
+command. `getup`, `backflip`, `mimic` and `supermimic` run end to end in smoke tests (1 M steps; no skill learned at
+that budget), and their full runs are in progress. See "Results" and "What was verified".
 
 ## Method
 
@@ -184,12 +189,12 @@ iterations/s (SuperMimic); rescale with `--num-timesteps` / `--iterations`.
 
 ## Results
 
-Fill with measured numbers only (from `eval/metrics.json`, deterministic
-policy, 128 episodes). Leave blank until measured.
+Measured on workstation1 (RTX 5080, jax 0.9.2, brax 0.14.2, playground 0.2.0), from `eval/metrics.json` with the
+deterministic policy over 128 episodes of 20 s. Rows stay blank until measured.
 
 | task | env steps | train wall time | env steps/s | episode return | success rate | fall rate | task metric |
 |---|---|---|---|---|---|---|---|
-| walk (vx 0.5 m/s) | | | | | | | fwd speed abs err (m/s): |
+| walk (vx 0.5 m/s) | 151.4 M | 71 min (4255 s incl. JIT) | ~36.9 k | 46.56 ± 0.25 | 1.00 | 0.00 | fwd speed abs err (m/s): 0.052 (mean speed 0.466) |
 | getup | | | | | | | median time to stand (s): |
 | backflip | | | | | | | max back rotation (rad): / landing success: |
 | mimic (keyframed backflip), PPO | | | | | | | max back rotation (rad): / landing success: |
