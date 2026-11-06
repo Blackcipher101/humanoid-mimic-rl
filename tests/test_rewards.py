@@ -138,3 +138,14 @@ def test_tracking_failed_thresholds():
     assert not rewards.tracking_failed(p, p + 0.5, rq, rq, 1.0, 1.2, np)
     assert rewards.tracking_failed(p, p + 1.0, rq, rq, 1.0, 1.2, np)
     assert rewards.tracking_failed(p, p, rq, far, 1.0, 1.2, np)
+
+
+def test_home_range_targets():
+    home = np.array([0.4, -0.2])
+    lo, hi = np.array([0.0, -0.87]), np.array([2.34, 0.35])
+    np.testing.assert_allclose(rewards.home_range_targets(np.zeros(2), home, lo, hi, np), home)
+    np.testing.assert_allclose(rewards.home_range_targets(np.ones(2), home, lo, hi, np), hi)
+    np.testing.assert_allclose(rewards.home_range_targets(-np.ones(2), home, lo, hi, np), lo)
+    np.testing.assert_allclose(rewards.home_range_targets(np.array([0.5, -0.5]), home, lo, hi, np),
+                               [0.4 + 0.5 * 1.94, -0.2 - 0.5 * 0.67])
+    np.testing.assert_allclose(rewards.home_range_targets(np.array([3.0, -3.0]), home, lo, hi, np), [2.34, -0.87])

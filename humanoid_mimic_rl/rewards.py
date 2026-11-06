@@ -250,3 +250,20 @@ def tracking_failed(
     pos_err = xp.sqrt(xp.sum(xp.square(root_pos_m - ref_root_pos_m), axis=-1))
     ang_err = quat.quat_angle_between(root_quat, ref_root_quat, xp)
     return (pos_err > max_pos_err_m) | (ang_err > max_angle_err_rad)
+
+
+# ---------------------------------------------------------------------------
+# Action mapping.
+# ---------------------------------------------------------------------------
+
+
+def home_range_targets(action: Array, home: Array, lower: Array, upper: Array, xp: ModuleType) -> Array:
+    """Joint targets from normalised actions in [-1, 1]: 0 = home pose, +1 = upper
+    joint limit, -1 = lower joint limit (piecewise linear per joint).
+
+    Zero action holds the home pose (a restoring prior, unlike offsets from the
+    current angles, where zero action means no restoring force at all), while
+    the full joint range stays reachable for getting up from the floor.
+    """
+    a = xp.clip(action, -1.0, 1.0)
+    return home + xp.where(a >= 0.0, a * (upper - home), a * (home - lower))
