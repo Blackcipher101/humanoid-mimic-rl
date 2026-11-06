@@ -27,6 +27,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jp
+import numpy as np
 from ml_collections import config_dict
 from mujoco_playground._src import mjx_env
 
@@ -52,11 +53,15 @@ def default_config() -> config_dict.ConfigDict:
         max_joint_vel_radps=10.0,
         posture_gain=0.5,
         stand_still_gain=0.5,
+        feet_under_length_m=0.25,  # length scale of the feet-under-torso reward
         noise_config=base.noise_config(),
         reward_config=config_dict.create(
             scales=config_dict.create(
+                # v2 (after the first full run sat upright on the floor, 0/128 stood up): uprightness only pays
+                # with height, height is squared, and feet-under-torso shapes the sit -> squat -> stand path.
                 upright=1.0,
-                torso_height=1.0,
+                torso_height=2.0,
+                feet_under=1.0,
                 posture=1.0,
                 stand_still=0.5,
                 action_rate=-0.01,
@@ -82,6 +87,7 @@ class T1Getup(base.T1FullCollisionEnv):
         super().__init__(config or default_config(), config_overrides)
         self._settle_steps = int(round(self._config.settle_time_s / self.sim_dt))
         self._stand_height_m = self._config.stand_height_frac * t1_model.T1_HOME_ROOT_HEIGHT_M
+        self._foot_site_ids = np.array([self._mj_model.site(name).id for name in ("left_foot", "right_foot")])
 
     def _random_fallen_qpos(self, rng: jax.Array) -> jax.Array:
         rng_q, rng_j = jax.random.split(rng)
@@ -122,8 +128,15 @@ class T1Getup(base.T1FullCollisionEnv):
         gate = rewards.standing_gate(up_z, height, self._config.stand_min_up_z, self._stand_height_m, jp)
         weights = jp.ones(self.action_size)
         terms = {
-            "upright": rewards.upright_reward(up_z, jp),
-            "torso_height": rewards.height_reward(height, t1_model.T1_HOME_ROOT_HEIGHT_M, jp),
+            "upright": rewards.tall_upright_reward(up_z, height, t1_model.T1_HOME_ROOT_HEIGHT_M, jp),
+            "torso_height": jp.square(rewards.height_reward(height, t1_model.T1_HOME_ROOT_HEIGHT_M, jp)),
+            "feet_under": jp.any(self.feet_contact(data)).astype(height.dtype)
+            * rewards.feet_under_torso_reward(
+                data.site_xpos[self._imu_site_id, :2],
+                data.site_xpos[self._foot_site_ids, :2],
+                self._config.feet_under_length_m,
+                jp,
+            ),
             "posture": gate
             * rewards.posture_reward(data.qpos[7:], self._default_pose, weights, self._config.posture_gain, jp),
             "stand_still": gate

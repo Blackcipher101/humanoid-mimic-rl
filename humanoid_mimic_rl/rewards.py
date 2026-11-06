@@ -58,6 +58,28 @@ def height_reward(height_m: Array, target_height_m: float, xp: ModuleType) -> Ar
     return xp.clip(height_m / target_height_m, 0.0, 1.0)
 
 
+def tall_upright_reward(up_z: Array, height_m: Array, target_height_m: float, xp: ModuleType) -> Array:
+    """Uprightness that only pays when the torso is also high: ``upright(up_z) * clip(h / h_target)^2``.
+
+    Rewarding uprightness and height separately lets a policy collect most of the
+    reward by sitting up straight on the floor (a local optimum seen in the first
+    full get-up run); the product removes that plateau.
+    """
+    frac = xp.clip(height_m / target_height_m, 0.0, 1.0)
+    return upright_reward(up_z, xp) * xp.square(frac)
+
+
+def feet_under_torso_reward(torso_xy: Array, feet_xy: Array, length_scale_m: float, xp: ModuleType) -> Array:
+    """``exp(-(d / L)^2)`` with ``d`` the horizontal distance from the torso to the feet midpoint.
+
+    Shapes the sit -> squat transition: feet must come under the body before the
+    robot can push itself up. ``feet_xy`` has shape ``(..., 2, 2)`` (left/right, xy).
+    """
+    mid = 0.5 * (feet_xy[..., 0, :] + feet_xy[..., 1, :])
+    d2 = xp.sum(xp.square(mid - torso_xy), axis=-1)
+    return xp.exp(-d2 / (length_scale_m * length_scale_m))
+
+
 def standing_gate(
     up_z: Array,
     height_m: Array,
