@@ -152,6 +152,19 @@ def test_actuator_caps_pd_authority(biped):
     assert cap_pos[0] == pytest.approx(200.0)
 
 
+def test_apply_servo_kp_changes_pd_authority(biped):
+    from humanoid_mimic_rl import g1_model
+
+    q = np.array([0.9, 0.9, 0.0, 0.0])
+    g1_model.apply_servo_kp(biped.m, {"l_ankle": 1000.0})
+    a = 1  # actuator driving l_ankle
+    assert biped.m.actuator_gainprm[a, 0] == 1000.0 and biped.m.actuator_biasprm[a, 1] == -1000.0
+    fb2 = type(biped)(biped.m, biped.feet, ["trunk"])  # re-read kp from the model
+    assert fb2.actuator_caps(q)[0][1] == pytest.approx(100.0)  # 1000 * 0.1 = 100 = force limit
+    with pytest.raises(KeyError):
+        g1_model.apply_servo_kp(biped.m, {"nope": 1.0})
+
+
 def test_flight_is_ballistic_and_conserves_angular_momentum(biped):
     p = _problem(biped)
     x = p.pack(np.array([[0.3, 0.2], [-0.8, 0.5], [0.6, -0.4], [-0.2, 0.1]]), 0.5)

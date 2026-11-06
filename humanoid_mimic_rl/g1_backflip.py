@@ -20,30 +20,32 @@ GROUPS: dict[str, tuple[int, ...]] = {
     "knee": (ix("left_knee_joint"), ix("right_knee_joint")),
     "ankle": (ix("left_ankle_pitch_joint"), ix("right_ankle_pitch_joint")),
     "shoulder": (ix("left_shoulder_pitch_joint"), ix("right_shoulder_pitch_joint")),
+    "waist": (ix("waist_pitch_joint"),),
 }
-# Waist pitch (range +-0.52 rad, 50 N m) and elbows stay at the home pose: letting
-# the optimiser use them produced large flight torques for little momentum benefit.
+# The waist pitch is free: held rigid it must accelerate the whole upper body
+# with the pelvis and needed 10x its cap. Waist roll stays at 0: the motion is
+# left/right symmetric, so roll cannot help. Elbows stay at the home pose.
 
 # Spline knots (s); the first two and last two are pinned to the home pose.
 KNOT_TIMES_S = np.array([0, 0.3, 0.55, 0.75, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.65, 1.85, 2.1, 2.5, 3.0])
 DURATION_S = 3.0
 
 # Hand-written starting point for the optimiser (rows: free knots 0.55 .. 2.1 s;
-# columns: hip, knee, ankle, shoulder in rad) and take-off time.
+# columns: hip, knee, ankle, shoulder, waist pitch in rad) and take-off time.
 INITIAL_KNOTS = np.array(
     [
-        [-0.5, 1.0, -0.5, 0.6],
-        [-1.0, 1.8, -0.8, 1.0],
-        [-0.4, 0.8, -0.3, -1.0],
-        [-0.2, 0.3, 0.3, -2.5],
-        [-1.2, 1.6, 0.0, -2.0],
-        [-2.0, 2.4, 0.0, -1.2],
-        [-2.2, 2.5, 0.0, -1.0],
-        [-1.6, 1.9, -0.2, -0.8],
-        [-1.0, 1.4, -0.4, -0.5],
-        [-1.0, 1.7, -0.7, -0.2],
-        [-0.9, 1.6, -0.7, 0.0],
-        [-0.5, 0.9, -0.4, 0.2],
+        [-0.5, 1.0, -0.5, 0.6, 0.0],
+        [-1.0, 1.8, -0.8, 1.0, 0.0],
+        [-0.4, 0.8, -0.3, -1.0, 0.0],
+        [-0.2, 0.3, 0.3, -2.5, 0.0],
+        [-1.2, 1.6, 0.0, -2.0, 0.0],
+        [-2.0, 2.4, 0.0, -1.2, 0.0],
+        [-2.2, 2.5, 0.0, -1.0, 0.0],
+        [-1.6, 1.9, -0.2, -0.8, 0.0],
+        [-1.0, 1.4, -0.4, -0.5, 0.0],
+        [-1.0, 1.7, -0.7, -0.2, 0.0],
+        [-0.9, 1.6, -0.7, 0.0, 0.0],
+        [-0.5, 0.9, -0.4, 0.2, 0.0],
     ]
 )
 INITIAL_TAKEOFF_S = 0.97
@@ -61,8 +63,11 @@ SOURCE = "humanoid_mimic_rl.g1_backflip + flip_opt (ballistic flight, inverse-dy
 
 
 def load_model(assets: Mapping[str, bytes]) -> mujoco.MjModel:
+    """Full-collision G1 with the flip-task servo stiffness (``g1_model.FLIP_SERVO_KP``)."""
     scene, full_assets = g1_model.full_collision_flat_scene(assets)
-    return mujoco.MjModel.from_xml_string(scene, assets=full_assets)
+    model = mujoco.MjModel.from_xml_string(scene, assets=full_assets)
+    g1_model.apply_servo_kp(model, g1_model.FLIP_SERVO_KP)
+    return model
 
 
 def floating_base(model: mujoco.MjModel) -> fd.FloatingBaseModel:

@@ -132,9 +132,10 @@ joint torques up to 11x the T1 limits. The flip tasks therefore moved to the
 **Unitree G1** (playground's 29-DoF model, 33.3 kg) with a clip that is
 dynamically consistent by construction (`humanoid_mimic_rl/flip_opt.py`):
 
-* decision variables: knots of C2 cubic splines for four left/right-symmetric
-  joint groups (hip pitch, knee, ankle pitch, shoulder pitch; everything else
-  at the home pose) and the take-off time;
+* decision variables: knots of C2 cubic splines for five joint groups (hip
+  pitch, knee, ankle pitch, shoulder pitch left/right-symmetric, plus waist
+  pitch; everything else at the home pose) and the take-off time. Waist roll
+  stays 0 because the motion is symmetric;
 * stance: feet flat and fixed; the root pose follows from closed-chain
   kinematics;
 * flight: the root is **integrated from the take-off state with zero external
@@ -166,23 +167,63 @@ numbers are in `data/generated/g1_backflip.report.json`. `make_g1_backflip.py`
 exits non-zero when a check fails, so `run_ws1.sh` never trains G1 tasks on an
 infeasible clip.
 
-**Status: no feasible G1 backflip found yet.** The best attempt (laptop, about
-25 min of staged least squares plus 400 CMA-ES generations at torque margin 3.0)
-still failed:
-* it did not touch down within 0.9 s of flight;
-* the waist pitch needed 10x its cap around take-off;
-* the CoP left the sole (2.6x the allowed offset).
+**Status: no feasible G1 backflip found yet.** Laptop runs, mujoco 3.17, 23 workers:
 
-Two G1 limits are tighter than the joint force limits suggest:
-* **waist pitch**: 50 N m force limit, PD authority about 39 N m at 0 rad, so about
-  33 N m usable at 85 %. It must accelerate the ~15 kg upper body with the pelvis;
-* **ankle pitch**: kp = 20 with a control range of [-0.87, 0.52] rad. Plantar-flexing
-  push-off authority is only 20*(0.52 - q) N m (about 6 N m at q = 0.2), far below
-  the 50 N m force limit.
+* First attempt (ankle kp 20, waist held at 0): about 25 min of staged least
+  squares plus 400 CMA-ES generations at torque margin 3.0. It still failed: no
+  touchdown within 0.9 s of flight, waist pitch at 10x its cap around take-off,
+  and the CoP 2.6x outside the allowed sole region.
+* A/B with equal budgets (take-off least squares, then 120 CMA-ES generations
+  at margin 3.0, from the same initial guess):
 
-Options: longer `--optimize` runs on a many-core machine, letting the waist
-move, or raising the flip envs' ankle/waist `kp`. The last one changes the
-robot model and needs the owner's decision.
+  | | old: ankle kp 20/2, waist fixed | new: ankle kp 40, waist free |
+  |---|---|---|
+  | worst torque/cap at start | 69 (ankle pitch) | 35 (ankle pitch) |
+  | cost at margin 3.0, after CMA-ES | 2647 | 2437 (-8 %) |
+  | cost at margin 0.85, after CMA-ES | 4484 | 4478 |
+  | landed within 0.9 s | no | no |
+  | worst torque/cap after CMA-ES | 11.3 (waist pitch) | 11.5 (waist pitch) |
+
+The stiffer ankles remove the ankle as the worst joint, but the
+residual drops only ~8 % on this budget. The blocker is now the **waist
+pitch**: the solutions found whip the pelvis (pitch acceleration -134 rad/s^2
+at take-off, up to -516 rad/s^2 in flight). The waist would then need
+380-570 N m to carry the ~15 kg upper body, against a cap of about 39 N m.
+A feasible flip has to rotate the upper body smoothly (pelvis pitch
+acceleration of roughly 35 rad/s^2 or less). Whether the long CMA-ES search on
+ws1 finds such a motion is open; the clip is exported only if the
+inverse-dynamics check passes.
+
+**Flip-task servo stiffness (owner decision).** The flip tasks
+`g1_backflip`, `g1_mimic` and `g1_supermimic` use `g1_model.FLIP_SERVO_KP`:
+ankle pitch and ankle roll kp go to 40. The optimiser and checker use the same
+model. Force limits are unchanged, and no other task or shared model is
+touched. Sources (both BSD-3-Clause, Unitree Robotics):
+
+* `unitree_rl_gym` @ `276801e`, `legged_gym/envs/g1/g1_config.py`: stiffness `'ankle': 40`;
+* `unitree_sdk2` @ `8e1b927`, `example/g1/low_level/g1_ankle_swing_example.cpp`:
+  Kp ankle pitch/roll 40, waist yaw 60, waist roll/pitch 40.
+
+The waist stays at playground's kp 75: Unitree's public value (40) is lower,
+and the only higher one, Menagerie's non-MJX `g1.xml` (kp 500 everywhere), is
+marked "needs tuning" there. The waist pitch is instead freed in the optimiser.
+
+Effective torque cap at the home pose, min(force limit, PD authority), N m, +/-:
+
+| joint | kp before -> after | force limit | cap before | cap after |
+|---|---|---|---|---|
+| ankle pitch | 20 -> 40 | 50 | +14.5 / -13.5 | +28.9 / -26.9 |
+| ankle roll | 2 -> 40 | 50 | +0.5 / -0.5 | +10.5 / -10.5 |
+| waist pitch / roll | 75 (unchanged) | 50 | +39 / -39 | +39 / -39 |
+| knee | 75 | 139 | +139 / -29 | unchanged |
+| hip pitch | 75 | 88 | +88 / -88 | unchanged |
+
+Near a joint limit the cap toward that limit falls to kp x distance; for
+example, at 0.2 rad from a limit the ankle cap is 8 N m (it was 4 N m).
+`make_g1_backflip.py` writes the effective caps into the report.
+`--torque-margin` sets both the last optimisation stage and the pass/fail
+check. If 0.85 cannot be reached, report the margin that passed rather than
+loosening it silently.
 
 ### Reference clip
 No licence-compatible humanoid backflip mocap exists for the T1 (see

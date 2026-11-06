@@ -32,6 +32,9 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
     HOME_ROOT_HEIGHT_M = g1_model.G1_HOME_ROOT_HEIGHT_M
     JOINT_NAMES = g1_model.G1_JOINT_NAMES
     END_EFFECTOR_SITES = g1_model.END_EFFECTOR_SITES
+    # Position-servo kp overrides (joint name -> kp) applied to this env's model
+    # only; empty = playground's gains. The flip tasks set g1_model.FLIP_SERVO_KP.
+    SERVO_KP_OVERRIDES: dict[str, float] = {}
 
     def __init__(self, config: config_dict.ConfigDict, config_overrides: dict[str, Any] | None = None) -> None:
         super().__init__(config, config_overrides)
@@ -39,6 +42,7 @@ class G1FullCollisionEnv(mjx_env.MjxEnv):
         self._model_assets = assets
         self._mj_model = mujoco.MjModel.from_xml_string(scene_xml, assets=assets)
         self._mj_model.opt.timestep = self.sim_dt
+        g1_model.apply_servo_kp(self._mj_model, self.SERVO_KP_OVERRIDES)
         self._mj_model.vis.global_.offwidth = 1920
         self._mj_model.vis.global_.offheight = 1080
         self._mjx_model = mjx.put_model(self._mj_model, impl=self._config.impl)
