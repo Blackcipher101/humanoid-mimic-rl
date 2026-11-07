@@ -174,4 +174,5 @@ def test_eval_mode_starts_mimic_at_clip_start():
     assert tasks.mimic_overrides(False, None) == {}
     assert tasks.mimic_overrides(True, None) == {"rsi_start_prob": 1.0}
     assert tasks.mimic_overrides(False, "height_tilt") == {"termination": "height_tilt"}
+    assert tasks.mimic_overrides(False, "height_tilt", 1.5) == {"termination": "height_tilt", "max_tilt_err": 1.5}
     assert mimic.default_config().rsi_start_prob < 1.0  # training keeps RSI

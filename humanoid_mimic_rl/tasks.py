@@ -22,13 +22,19 @@ G1_REFERENCE_PATH = REPO_ROOT / "data" / "generated" / "g1_backflip.npz"
 CONTACTS_PER_WORLD = 32
 
 
-def mimic_overrides(eval_mode: bool, termination: str | None) -> dict[str, object]:
-    """Config overrides shared by the mimic tasks (``mimic`` and ``g1_mimic``)."""
+def mimic_overrides(eval_mode: bool, termination: str | None, max_tilt_err: float | None = None) -> dict[str, object]:
+    """Config overrides shared by the mimic tasks (``mimic`` and ``g1_mimic``).
+
+    ``max_tilt_err``: ``height_tilt`` termination threshold on ``|g_z_body - g_z_ref|`` (env default 0.8;
+    validated by the env to lie in (0, 2], 2 disables the tilt test).
+    """
     out: dict[str, object] = {}
     if eval_mode:
         out["rsi_start_prob"] = 1.0  # always start at t = 0
     if termination is not None:
         out["termination"] = termination
+    if max_tilt_err is not None:
+        out["max_tilt_err"] = float(max_tilt_err)
     return out
 
 
@@ -94,6 +100,7 @@ def make_env(
     allow_infeasible_clip: bool = False,
     routine: bool | None = None,
     routine_options: dict[str, object] | None = None,
+    max_tilt_err: float | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -115,6 +122,7 @@ def make_env(
         torque feasibility check (see ``g1_model.resolve_torque_scale``).
       routine, routine_options: ``g1_mimic`` only: multi-stage routine reward, see
         ``routine_overrides`` and ``humanoid_mimic_rl.routine``.
+      max_tilt_err: mimic tasks only: ``height_tilt`` tilt threshold (default: the env config's 0.8).
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. For ``mimic`` / ``g1_mimic``, every episode
         starts at clip time 0 (``rsi_start_prob=1``) so the whole clip is scored.
@@ -136,6 +144,8 @@ def make_env(
         return getup.T1Getup(getup.default_config(), overrides)
     if task == "backflip":
         return backflip.T1Backflip(backflip.default_config(), overrides)
+    if max_tilt_err is not None and task not in ("mimic", "g1_mimic"):
+        raise ValueError(f"max_tilt_err is only available for the mimic tasks, not {task!r}")
     if routine and task != "g1_mimic":
         raise ValueError(f"the routine reward is only available for g1_mimic, not {task!r}")
     if task == "mimic":
@@ -146,7 +156,7 @@ def make_env(
         hold = cfg.hold_final_s if hold_final_s is None else float(hold_final_s)
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
-        overrides.update(mimic_overrides(eval_mode, termination))
+        overrides.update(mimic_overrides(eval_mode, termination, max_tilt_err))
         return mimic.T1Mimic(cfg, overrides)
     if task in ("g1_backflip", "g1_mimic"):
         path = (reference_path or G1_REFERENCE_PATH).resolve()
@@ -159,7 +169,7 @@ def make_env(
         overrides["reference_path"] = str(path)
         overrides["hold_final_s"] = hold
         overrides["episode_length"] = mimic.episode_length_for(clip, cfg.ctrl_dt, hold)
-        overrides.update(mimic_overrides(eval_mode, termination))
+        overrides.update(mimic_overrides(eval_mode, termination, max_tilt_err))
         overrides.update(routine_overrides(path, routine, routine_options))
         return g1_flip.G1Mimic(cfg, overrides)
     raise ValueError(f"unknown task {task!r}")

@@ -301,7 +301,8 @@ def main() -> None:
                          allow_infeasible_clip=bool(run_cfg.get("allow_infeasible_clip", False)),
                          routine=bool(run_cfg.get("routine")),
                          routine_options={k: v for k, v in (run_cfg.get("routine") or {}).items()
-                                          if k in tasks.ROUTINE_OPTIONS})
+                                          if k in tasks.ROUTINE_OPTIONS},
+                         max_tilt_err=run_cfg["env_config"].get("max_tilt_err") if task in ("mimic", "g1_mimic") else None)
     model_label = getattr(env.unwrapped, "model_label", None)
     steps = tasks.episode_length(env)
     policy = load_policy(args.run_dir, ckpt, algo)
