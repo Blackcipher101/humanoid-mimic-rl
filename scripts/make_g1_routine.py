@@ -72,25 +72,32 @@ def main() -> int:
     p.add_argument("--g1-xml-dir", type=Path, required=True)
     p.add_argument("--mesh-dir", type=Path, required=True)
     p.add_argument("--torque-margin", type=float, default=g1_cmu_feasibility.TORQUE_MARGIN)
+    p.add_argument("--torque-scale", type=float, default=1.0,
+                   help="peak-torque multiplier recorded in the report and used by the torque check; != 1 is a MODIFIED "
+                        "robot (output gets a _ts<k> suffix and the torque_scale_label disclaimer)")
     args = p.parse_args()
+    if not args.torque_scale > 0.0:
+        p.error(f"--torque-scale must be positive, got {args.torque_scale}")
+    scale = float(args.torque_scale)
     flip_path, kick_path = args.data_dir / FLIP_SOURCE, args.data_dir / KICK_SOURCE
     flip, kick = reference.load_clip(flip_path), reference.load_clip(kick_path)
     rig = g1_retarget.G1Rig(cmu_tool.load_assets(args.g1_xml_dir, args.mesh_dir))
     fb = g1_backflip.floating_base(rig.m)
 
     r = g1_routine.assemble(rig, flip, kick)
-    out_path = args.data_dir / OUT_NAME
+    out_path = args.data_dir / (OUT_NAME if scale == 1.0 else OUT_NAME.replace(".npz", f"_ts{scale:g}.npz"))
     source = (
         "CMU Graphics Lab Motion Capture Database subjects 87 trial 3 (backflip) and 88 trial 6 (jump and spin kick), "
         "http://mocap.cs.cmu.edu; retargeted to the G1 by humanoid_mimic_rl.g1_retarget, joined by "
-        f"humanoid_mimic_rl.g1_routine; {g1_model.torque_scale_label(1.0)}"
+        f"humanoid_mimic_rl.g1_routine; {g1_model.torque_scale_label(scale)}"
     )
-    rep, ok = cmu_tool.check(fb, r.qpos, r.fps_hz, args.torque_margin)
+    # motor torque ratios scale as 1 / k, so the torque criterion at scale k is ratio <= margin * k
+    rep, ok = cmu_tool.check(fb, r.qpos, r.fps_hz, args.torque_margin * scale)
     src_reports = {n: json.loads(g1_model.clip_report_path(pth).read_text(encoding="utf-8"))
                    for n, pth in (("backflip", flip_path), ("spin_kick", kick_path))}
     report = {
-        "torque_scale": 1.0,
-        "model_label": g1_model.torque_scale_label(1.0),
+        "torque_scale": scale,
+        "model_label": g1_model.torque_scale_label(scale),
         "variant": "routine: CMU 87/3 backflip -> transition -> CMU 88/6 spin kick -> stand hold",
         "sources": {n: {"clip": str(pth), "trial": src_reports[n]["trial"], "source_files": src_reports[n]["source_files"],
                         "source_variant": src_reports[n]["variant"], "trim": r.sources[n]}
@@ -104,10 +111,10 @@ def main() -> int:
         "routine": None,
         "continuity": g1_routine.continuity_report(rig, r),
         "check": rep,
-        "check_thresholds": {"torque_ratio_max": args.torque_margin},
+        "check_thresholds": {"torque_ratio_max": args.torque_margin * scale},
         "dynamics_check_passed": ok,
         "passed": ok,
-        "passed_note": "accepted when False: train with --allow-infeasible-clip (the robot keeps its real torque limits)",
+        "passed_note": "accepted when False: train with --allow-infeasible-clip (the robot keeps the torque limits recorded here)",
         "checker": "g1_cmu_feasibility.check_clip (feet+hands contact LP; best case over contact force splits)",
     }
     report["torque_scale_for_torque_criterion"] = rep["torque_ratio_max"] / args.torque_margin
