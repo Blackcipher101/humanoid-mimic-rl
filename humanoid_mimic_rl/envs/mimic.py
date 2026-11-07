@@ -67,6 +67,11 @@ def default_config() -> config_dict.ConfigDict:
         hold_final_s=0.6,
         rsi_start_prob=0.1,  # probability of starting at t = 0 instead of a random time
         rsi_end_margin_s=0.1,  # never start closer than this to the clip end
+        # Focused RSI (a static form of BlinkMimic's failure search): of the random starts, this fraction is drawn
+        # from [rsi_focus_start_s, rsi_focus_end_s] instead of the whole clip, e.g. just before a known failure point.
+        rsi_focus_prob=0.0,
+        rsi_focus_start_s=0.0,
+        rsi_focus_end_s=0.0,
         init_clearance_m=0.0,
         fall_height_m=0.2,
         max_root_pos_err_m=0.6,
@@ -146,6 +151,12 @@ class MimicTask:
             raise ValueError(f"max_root_height_err_m must be > 0, got {c.max_root_height_err_m}")
         if not 0.0 < c.max_tilt_err <= 2.0:
             raise ValueError(f"max_tilt_err must be in (0, 2], got {c.max_tilt_err}")
+        if not 0.0 <= c.rsi_focus_prob <= 1.0:
+            raise ValueError(f"rsi_focus_prob must be in [0, 1], got {c.rsi_focus_prob}")
+        t_max = max(clip.duration_s - c.rsi_end_margin_s, 0.0)
+        if c.rsi_focus_prob > 0.0 and not 0.0 <= c.rsi_focus_start_s < c.rsi_focus_end_s <= t_max:
+            raise ValueError(f"rsi focus window [{c.rsi_focus_start_s}, {c.rsi_focus_end_s}] s must satisfy "
+                             f"0 <= start < end <= {t_max:.3f} s (clip duration minus rsi_end_margin_s)")
         self._clip = clip
         self._ref_qpos = jp.array(clip.qpos)
         self._ref_qvel = jp.array(clip.qvel)
@@ -184,13 +195,15 @@ class MimicTask:
         return reference.sample_clip(self._ref_qpos, self._ref_qvel, self._ref_sites, self._clip.fps_hz, t_s, jp)
 
     def reset(self, rng: jax.Array) -> mjx_env.State:
-        rng, k_start, k_t = jax.random.split(rng, 3)
-        t_max = max(self._clip.duration_s - self._config.rsi_end_margin_s, 0.0)
-        t0 = jp.where(
-            jax.random.bernoulli(k_start, self._config.rsi_start_prob),
-            0.0,
+        rng, k_start, k_t, k_focus, k_tf = jax.random.split(rng, 5)
+        c = self._config
+        t_max = max(self._clip.duration_s - c.rsi_end_margin_s, 0.0)
+        t_random = jp.where(
+            jax.random.bernoulli(k_focus, c.rsi_focus_prob),
+            jax.random.uniform(k_tf, (), minval=c.rsi_focus_start_s, maxval=max(c.rsi_focus_end_s, c.rsi_focus_start_s)),
             jax.random.uniform(k_t, (), minval=0.0, maxval=t_max),
         )
+        t0 = jp.where(jax.random.bernoulli(k_start, c.rsi_start_prob), 0.0, t_random)
         qpos, qvel, _ = self.reference_at(t0)
         data = self.make_data(qpos, qvel, qpos[7:])
         data = self.lift_above_floor(data, self._config.init_clearance_m)

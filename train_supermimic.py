@@ -62,6 +62,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-tilt-err", type=float, default=None,
                    help="height_tilt termination: max |g_z_body - g_z_ref| in (0, 2] (default 0.8; 2 = no tilt test). "
                         "Looser lets a policy that lags a fast rotation (backflip) keep the episode")
+    p.add_argument("--rsi-focus", type=float, nargs=3, metavar=("START_S", "END_S", "PROB"), default=None,
+                   help="mimic tasks: draw this fraction of the random episode starts from [START_S, END_S] "
+                        "(e.g. just before a known failure point; a static form of BlinkMimic's failure search)")
     p.add_argument("--routine", action=argparse.BooleanOptionalAction, default=None,
                    help="g1_mimic: routine reward: dense tracking + per-milestone bonuses (flip -> kick -> stand, "
                         "humanoid_mimic_rl.routine). Default: on iff the clip report has a 'routine' section")
@@ -108,11 +111,13 @@ def main() -> None:
     env = tasks.make_env(task, args.impl, cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
-                         routine_options=tasks.routine_options_from_args(args), max_tilt_err=args.max_tilt_err)
+                         routine_options=tasks.routine_options_from_args(args), max_tilt_err=args.max_tilt_err,
+                         rsi_focus=args.rsi_focus)
     eval_env = tasks.make_env(task, args.impl, cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
                          routine_options=tasks.routine_options_from_args(args), max_tilt_err=args.max_tilt_err,
+                         rsi_focus=args.rsi_focus,
                          eval_mode=True)
     trainer = sm.SuperMimicTrainer(env, cfg)
 
