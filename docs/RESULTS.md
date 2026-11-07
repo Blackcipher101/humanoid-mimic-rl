@@ -7,9 +7,10 @@
 *Trained walk policy, 0.5 m/s forward command ([mp4](media/walk_full.mp4)).*
 
 **Status:** `walk` is trained and evaluated: 128 episodes of 20 s, 0 falls, 100 % success, 0.47 m/s against a 0.5 m/s
-command. `getup` (v5) is trained: 127/128 episodes end standing, median time to stand 1.32 s. `backflip`, `mimic`
-and `supermimic` run end to end in smoke tests (1 M steps; no skill learned at that budget), and their full runs are in
-progress. See "Results" and "What was verified".
+command. `getup` (v5) is trained: 127/128 episodes end standing, median time to stand 1.32 s. `supermimic`
+is trained on two clips: the T1 walk clip (128/128 complete, 0 falls, joint RMSE 0.063 rad) and the CMU spin kick on
+the Unitree G1 at published peak torques with self-collision (64/64 complete, 0 falls, joint RMSE 0.067 rad).
+`backflip` and DeepMimic `mimic` did not learn on the T1 (the keyframed clip is physically infeasible). See "Results" and "What was verified".
 
 ## Results
 
@@ -24,6 +25,8 @@ deterministic policy over 128 episodes of 20 s. Rows stay blank until measured.
 | backflip | 151 M | ~85 min | ~28-37 k | 3.25 ± 0.03 | 0.00 | 1.00 | max back rotation 0.23 rad; 0 full rotations |
 | mimic (keyframed backflip), PPO | | | | | | | max back rotation (rad): / landing success: |
 | mimic (keyframed backflip), SuperMimic | (iterations:) | | (it/s:) | | | | max back rotation (rad): / landing success: |
+| SuperMimic, T1 walk clip (8 s, 128 episodes) | 114.9 M (14k of 60k iterations, stopped early) | 76 min | ~25 k | 5.82 ± 0.12 | 1.00 completion | 0.00 | joint RMSE 0.063 rad, root 0.18 m / 0.083 rad |
+| SuperMimic, G1 CMU 88_06 spin kick (4.2 s, 64 episodes) | 245.9 M (30k iterations) | 6.3 h (22842 s) | ~10.8 k | 2.45 ± 0.23 | 1.00 completion | 0.00 | joint RMSE 0.067 rad, root 0.32 m / 0.19 rad |
 
 ## What was verified (and what was not)
 
@@ -49,8 +52,20 @@ reward), backflip and mimic.
 - **The flip is moving to the Unitree G1,** with a physically valid reference: ballistic flight, conserved angular
   momentum, and torques within limits, checked by the same inverse-dynamics test before training.
 
+- **SuperMimic evaluation fix:** the first evaluation started 90 % of episodes at random clip times and counted
+  reaching the end of the clip as a failure. Evaluation now starts at t = 0 and reports completion, fall and
+  tracking-failure rates separately. Training uses the paper's height/tilt termination (`--termination height_tilt`).
+- **G1 spin kick:** CMU subject 88 trial 06, retargeted to the G1 (Froude time scaling, IK, contact locks). The
+  inverse-dynamics check fails (torque up to 3.4x peak, left hip pitch 2.3x), so it was trained with
+  `--allow-infeasible-clip` as an approximation. Self-collision is on. Over training, the time it followed the clip went
+  from 1.6 s (1k iterations) to 3.0 s (10k) to the full 4.18 s.
+- **Not working yet:** a backflip -> spin kick -> stand routine built from the CMU backflip clip did not learn (no
+  rotation past ~45 deg after 20k iterations; that flip needs about 4x the G1's waist torque). Its code is not in
+  this repository yet.
+
 **Fixes made during the runs:**
 - jax pinned to 0.9.2, because 0.12 removed `jax.device_put_replicated`, which brax 0.14.2 uses;
 - `eval_render.py` loads PPO checkpoints whose saved config has null initialisers (a brax 0.14.2 `load_config` bug).
 
-**Laptop tests:** 87 unit tests pass (`pytest -q`).
+**Tests:** 123 pass, 12 skipped on workstation1 (`pytest -q tests`); the 14 CMU retargeting tests also pass with the
+real CMU files and G1 assets (`CMU_MOCAP_DIR`, `G1_XML_DIR`, `G1_MESH_DIR`).
