@@ -76,7 +76,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--routine-stand-bonus", type=float, default=None, help="stand-at-end bonus fraction (default 0.1)")
     p.add_argument("--routine-gated", action="store_true",
                    help="routine reward: also multiply the dense reward after a missed milestone window by 0 (off)")
-    return p.parse_args()
+    p.add_argument("--init-policy", type=Path, default=None,
+                   help="warm start: policy weights + observation statistics from a checkpoints/<iter>.msgpack of a "
+                        "run with the same env, clip and network config; world model and critic start fresh")
+    p.add_argument("--freeze-policy-iters", type=int, default=0,
+                   help="with --init-policy: first N iterations fit only the world model and critic (policy fixed)")
+    args = p.parse_args()
+    if args.freeze_policy_iters < 0:
+        p.error("--freeze-policy-iters must be >= 0")
+    if args.freeze_policy_iters and args.init_policy is None:
+        p.error("--freeze-policy-iters needs --init-policy")
+    if args.init_policy is not None and not args.init_policy.is_file():
+        p.error(f"--init-policy {args.init_policy} not found")
+    return args
 
 
 def _versions() -> dict[str, str]:
@@ -136,6 +148,8 @@ def main() -> None:
         "model_label": getattr(env.unwrapped, "model_label", None),
         "allow_infeasible_clip": args.allow_infeasible_clip,
         "routine": routine_cfg,
+        "init_policy": str(args.init_policy.resolve()) if args.init_policy else None,
+        "freeze_policy_iters": args.freeze_policy_iters,
         "versions": _versions(),
         "devices": [str(d) for d in jax.devices()],
     }
@@ -150,7 +164,12 @@ def main() -> None:
 
     t0 = time.monotonic()
     ts = trainer.init(args.seed)
+    if args.init_policy is not None:
+        ts = trainer.warm_start(ts, args.init_policy)
+        print(f"[init] policy + obs statistics from {args.init_policy}; policy frozen for the first "
+              f"{args.freeze_policy_iters} iterations", flush=True)
     warmup_fn, iteration_fn = trainer.jitted()
+    frozen_fn = trainer.jitted_frozen_policy() if args.freeze_policy_iters else None
     eval_fn = trainer.make_eval_fn(eval_env)
     for _ in range(cfg.warmup_iterations):
         ts, _ = warmup_fn(ts)
@@ -163,7 +182,7 @@ def main() -> None:
     last: dict[str, float] = {}
     eval_key = jax.random.PRNGKey(args.seed + 1)
     for it in range(1, cfg.num_iterations + 1):
-        ts, m = iteration_fn(ts)
+        ts, m = frozen_fn(ts) if it <= args.freeze_policy_iters else iteration_fn(ts)
         if it == 1:
             jax.block_until_ready(m)
             t_first = time.monotonic()

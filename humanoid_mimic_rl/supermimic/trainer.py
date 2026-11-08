@@ -40,6 +40,7 @@ import jax
 import jax.numpy as jp
 import numpy as np
 import optax
+from brax.training import types as training_types
 from brax.training.acme import running_statistics
 from flax import struct
 from mujoco import mjx
@@ -477,15 +478,24 @@ class SuperMimicTrainer:
         )
         return ts.replace(v_params=v_params, v_opt=v_opt), jp.mean(losses)
 
-    def improve_policy(self, ts: TrainState) -> tuple[TrainState, dict[str, jax.Array]]:
+    def improve_policy(self, ts: TrainState, update_policy: bool = True) -> tuple[TrainState, dict[str, jax.Array]]:
+        """Policy step on imagined rollouts, then the critic fit on them.
+
+        ``update_policy=False`` (static) still fits the critic but leaves the policy and its optimiser
+        state unchanged: used after ``warm_start`` so a fresh world model and critic do not move a trained
+        policy before they are fit to it.
+        """
         cfg = self.cfg
         key, k_start, k_img, k_crit = jax.random.split(ts.key, 4)
         start = replay_states(ts.replay, k_start, cfg.policy_batch_size)
         (loss, (traj, crit_h, ret)), grads = jax.value_and_grad(self._policy_loss, has_aux=True)(
             ts.pi_params, ts, start, k_img
         )
-        updates, pi_opt = self.pi_tx.update(grads, ts.pi_opt, ts.pi_params)
-        ts = ts.replace(pi_params=optax.apply_updates(ts.pi_params, updates), pi_opt=pi_opt, key=key)
+        if update_policy:
+            updates, pi_opt = self.pi_tx.update(grads, ts.pi_opt, ts.pi_params)
+            ts = ts.replace(pi_params=optax.apply_updates(ts.pi_params, updates), pi_opt=pi_opt, key=key)
+        else:
+            ts = ts.replace(key=key)
 
         traj = jax.lax.stop_gradient(traj)
         targets = self._critic_targets(ts, traj, jax.lax.stop_gradient(crit_h))
@@ -526,6 +536,50 @@ class SuperMimicTrainer:
             return ts, {**m_c, **m_w, **m_p}
 
         return jax.jit(warmup), jax.jit(iteration)
+
+    def jitted_frozen_policy(self) -> Callable[[TrainState], Any]:
+        """Collect + fit WM + fit critic, policy unchanged (the phase after ``warm_start``)."""
+
+        def iteration(ts: TrainState):
+            ts, m_c = self.collect(ts)
+            ts, m_w = self.fit_world_model(ts)
+            ts, m_p = self.improve_policy(ts, update_policy=False)
+            return ts, {**m_c, **m_w, **m_p}
+
+        return jax.jit(iteration)
+
+    def warm_start(self, ts: TrainState, checkpoint: Path, stats_count: float = 1e7) -> TrainState:
+        """Load policy weights and observation statistics from a ``save_checkpoint`` file.
+
+        The checkpoint holds only the policy and the observation mean/std, so the world model and critic
+        start fresh (fit them with ``jitted_frozen_policy`` first). The statistics get a large pseudo-count
+        so the policy's input normalisation stays put while collection keeps updating it. Raises if the
+        network shapes do not match (different env, clip type or trick set).
+        """
+        payload = flax.serialization.msgpack_restore(checkpoint.read_bytes())
+        missing = {"policy", "obs_mean", "obs_std"} - set(payload)
+        if missing:
+            raise ValueError(f"{checkpoint}: not a SuperMimic checkpoint (missing {sorted(missing)})")
+        pi_params = flax.serialization.from_state_dict(ts.pi_params, payload["policy"])
+        for new, old in zip(jax.tree_util.tree_leaves(pi_params), jax.tree_util.tree_leaves(ts.pi_params)):
+            if new.shape != old.shape:
+                raise ValueError(f"{checkpoint}: policy shape {new.shape} != {old.shape} of this config")
+        mean, std = jp.asarray(payload["obs_mean"]), jp.asarray(payload["obs_std"])
+        if mean.shape != ts.obs_stats.mean.shape:
+            raise ValueError(f"{checkpoint}: obs dim {mean.shape} != {ts.obs_stats.mean.shape} of this env")
+        if not (np.all(np.isfinite(mean)) and np.all(np.isfinite(std))):
+            raise ValueError(f"{checkpoint}: non-finite observation statistics")
+        if not 0 < stats_count < 2**32:
+            raise ValueError(f"stats_count must be in (0, 2**32), got {stats_count}")
+        old = ts.obs_stats.count
+        if isinstance(old, training_types.UInt64):  # brax keeps the count as two uint32 halves
+            count = training_types.UInt64(hi=jp.zeros_like(jp.asarray(old.hi)),
+                                          lo=jp.asarray(int(stats_count), jp.asarray(old.lo).dtype))
+        else:
+            count = jp.asarray(stats_count, jp.asarray(old).dtype)
+        obs_stats = ts.obs_stats.replace(mean=mean, std=std, count=count,
+                                         summed_variance=jp.square(std) * jp.float32(stats_count))
+        return ts.replace(pi_params=pi_params, obs_stats=obs_stats)
 
     # ------------------------------------------------------------------
     # Evaluation and checkpoints.
