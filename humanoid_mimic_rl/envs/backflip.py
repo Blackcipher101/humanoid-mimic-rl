@@ -141,6 +141,10 @@ class BackflipTask:
     def _motion_prior(self) -> MotionPrior:
         raise NotImplementedError
 
+    def _torque_cost(self, data: Any) -> jax.Array:
+        """Torque regulariser term (before its reward scale): sum of squared actuator torques (N^2 m^2)."""
+        return rewards.torque_cost(data.actuator_force, jp)
+
     @property
     def motion_end_s(self) -> float:
         return self._motion_end_s
@@ -206,7 +210,7 @@ class BackflipTask:
             * jp.where(landed > 0.0, 1.0, 0.0)
             * rewards.posture_reward(data.qpos[7:], self._default_pose, jp.ones(self.action_size), c.posture_gain, jp),
             "action_rate": rewards.action_rate_cost(action, state.info["last_act"], state.info["last_last_act"], jp),
-            "torques": rewards.torque_cost(data.actuator_force, jp),
+            "torques": self._torque_cost(data),
             "dof_pos_limits": rewards.joint_limit_cost(data.qpos[7:], self._soft_lowers, self._soft_uppers, jp),
         }
         reward, scaled = base.weighted_reward(terms, c.reward_config.scales, self.dt)

@@ -79,6 +79,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--init-policy", type=Path, default=None,
                    help="warm start: policy weights + observation statistics from a checkpoints/<iter>.msgpack of a "
                         "run with the same env, clip and network config; world model and critic start fresh")
+    p.add_argument("--learning-rate", type=float, default=None,
+                   help="override the peak learning rate of world model, policy and critic (default 2e-4); "
+                        "lower it to fine-tune a --init-policy without overwriting what it learned")
     p.add_argument("--freeze-policy-iters", type=int, default=0,
                    help="with --init-policy: first N iterations fit only the world model and critic (policy fixed)")
     args = p.parse_args()
@@ -114,6 +117,10 @@ def main() -> None:
         cfg = dataclasses.replace(cfg, num_envs=args.num_envs)
     if args.policy_batch_size is not None:
         cfg = dataclasses.replace(cfg, policy_batch_size=args.policy_batch_size)
+    if args.learning_rate is not None:
+        if not 0.0 < args.learning_rate < 1.0:
+            raise SystemExit(f"--learning-rate must be in (0, 1), got {args.learning_rate}")
+        cfg = dataclasses.replace(cfg, learning_rate=args.learning_rate)
     cfg.validate()
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
