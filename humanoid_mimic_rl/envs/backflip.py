@@ -36,6 +36,7 @@ from ml_collections import config_dict
 from mujoco_playground._src import mjx_env
 
 from humanoid_mimic_rl import keyframes as kf
+from humanoid_mimic_rl import quat
 from humanoid_mimic_rl import rewards
 from humanoid_mimic_rl import t1_model
 from humanoid_mimic_rl.envs import t1_full_collision as base
@@ -61,6 +62,14 @@ def default_config() -> config_dict.ConfigDict:
         # Targets.
         takeoff_vz_target_mps=2.5,
         pitch_rate_target_radps=10.0,
+        # Rotation budget. The accumulated backward rotation (rad, summed per control step
+        # as in metrics.cumulative_pitch_rad) scales the pitch_rate reward by
+        # clip((rotation_target_rad - rotation) / rotation_fade_rad, 0, 1), so spinning past
+        # one somersault earns nothing; beyond over_rotation_limit_rad the episode terminates.
+        # inf (default) disables both.
+        rotation_target_rad=math.inf,
+        rotation_fade_rad=1.0,
+        over_rotation_limit_rad=math.inf,
         land_min_up_z=0.8,
         land_height_frac=0.75,  # of the home torso height
         fall_height_m=0.2,  # trunk/head geom centre height => fall
@@ -173,9 +182,12 @@ class BackflipTask:
             "rng": rng,
             "last_act": jp.zeros(self.action_size),
             "last_last_act": jp.zeros(self.action_size),
+            "rotation_rad": jp.zeros(()),
+            "prev_root_quat": data.qpos[3:7],
         }
         metrics = {f"reward/{k}": jp.zeros(()) for k in self._config.reward_config.scales}
         metrics["fell"] = jp.zeros(())
+        metrics["over_rotated"] = jp.zeros(())
         obs = self.proprio_obs(data, info, phase_features(data.time, self._motion_end_s))
         return mjx_env.State(data, obs, jp.zeros(()), jp.zeros(()), metrics, info)
 
@@ -189,8 +201,16 @@ class BackflipTask:
         up_z = self.up_z(data)
         height = self.torso_height(data)
         contact = self.feet_contact(data)
-        angvel_body = data.qvel[3:6]  # free-joint angular velocity, body frame (rad/s)
         vz = data.qvel[2]  # world-frame vertical root velocity (m/s)
+        # Backward pitch rate (rad/s) from the body-frame rotation over this control step,
+        # log(q_prev^-1 q). Not the instantaneous qvel[3:6]: with stiff torque-mode PD the pelvis
+        # chatters at the sim rate (G1 at 6x: qvel/gyro read ~22 rad/s about y while the root turns
+        # ~1 rad/s), and sampling that once per control step aliases it.
+        rel = quat.quat_mul(quat.quat_conj(state.info["prev_root_quat"], jp), data.qpos[3:7], jp)
+        back_step_rad = -quat.quat_to_rotvec(rel, jp)[1]
+        back_rate = back_step_rad / self.dt
+        rotation = state.info["rotation_rad"] + back_step_rad
+        spin_budget = jp.clip((c.rotation_target_rad - rotation) / c.rotation_fade_rad, 0.0, 1.0)
 
         def win(w: tuple[float, float]) -> jax.Array:
             return rewards.time_window(t, w[0], w[1], jp)
@@ -203,7 +223,8 @@ class BackflipTask:
             ),
             "takeoff": win(self._win_pushoff) * rewards.ramp_reward(vz, c.takeoff_vz_target_mps, jp),
             "pitch_rate": win(self._win_rotate)
-            * rewards.ramp_reward(rewards.backward_pitch_rate(angvel_body), c.pitch_rate_target_radps, jp),
+            * spin_budget
+            * rewards.ramp_reward(back_rate, c.pitch_rate_target_radps, jp),
             "airborne": win(self._win_airborne) * jp.where(jp.any(contact), 0.0, 1.0),
             "landing": win(self._win_landing) * landed,
             "posture": win(self._win_settle)
@@ -216,14 +237,18 @@ class BackflipTask:
         reward, scaled = base.weighted_reward(terms, c.reward_config.scales, self.dt)
 
         fell = self.fall_geom_min_height(data) < c.fall_height_m
-        done = fell | self.is_invalid(data)
+        over_rotated = rotation > c.over_rotation_limit_rad
+        done = fell | over_rotated | self.is_invalid(data)
 
+        state.info["rotation_rad"] = rotation
+        state.info["prev_root_quat"] = data.qpos[3:7]
         state.info["last_last_act"] = state.info["last_act"]
         state.info["last_act"] = action
         obs = self.proprio_obs(data, state.info, phase_features(t, self._motion_end_s))
         for k, v in scaled.items():
             state.metrics[f"reward/{k}"] = v
         state.metrics["fell"] = fell.astype(jp.float32)
+        state.metrics["over_rotated"] = over_rotated.astype(jp.float32)
         return state.replace(data=data, obs=obs, reward=reward, done=done.astype(reward.dtype))
 
 

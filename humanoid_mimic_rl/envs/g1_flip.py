@@ -66,11 +66,22 @@ def backflip_config(reference_path: str, torque_scale: float) -> config_dict.Con
     # gave ~-40 per step at 6x peak torques, so the clipped total reward was 0 everywhere and PPO had no
     # signal. -0.02: all 29 joints saturated costs 0.58 per step, against ~+1.5 for pose + orientation.
     cfg.reward_config.scales.torques = TORQUE_COST_SCALE_NORMALISED
+    # Without a rotation budget the pitch_rate reward kept paying until the clip's touch-down, and the
+    # PPO policy spun ~1.4 turns (9 rad) and never landed (0/32 rendered landings at 150M steps; 97-100%
+    # falls in training evals after 250M more).
+    cfg.rotation_target_rad = ROTATION_TARGET_RAD
+    cfg.rotation_fade_rad = ROTATION_FADE_RAD
+    cfg.over_rotation_limit_rad = OVER_ROTATION_LIMIT_RAD
     return cfg
 
 
 # Reward scale of the peak-normalised torque term (see backflip_config).
 TORQUE_COST_SCALE_NORMALISED = -0.02
+# One somersault; the spin reward fades out over the last ROTATION_FADE_RAD before it.
+ROTATION_TARGET_RAD = 2.0 * math.pi
+ROTATION_FADE_RAD = 1.0
+# Terminate (no further reward) once the robot is ~70 deg past a full turn.
+OVER_ROTATION_LIMIT_RAD = 2.0 * math.pi + 1.2
 
 
 class G1Backflip(backflip.BackflipTask, G1FullCollisionEnv):
