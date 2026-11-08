@@ -200,9 +200,9 @@ def make_recorder(task: str, env: Any) -> Callable[[mjx_env.State], dict[str, ja
         else:
             out["feet_contact"] = env.feet_contact(d)
             out["time"] = d.time  # clip time for the mimic tracking metrics
-            if "fell" in state.metrics:
-                out["fell"] = state.metrics["fell"]
-                out["tracking_failed"] = state.metrics["tracking_failed"]
+            for k in ("fell", "tracking_failed"):  # backflip tasks have "fell" only (no tracking termination)
+                if k in state.metrics:
+                    out[k] = state.metrics[k]
             for k in metrics.ROUTINE_FLAGS:
                 if k in state.metrics:
                     out[k] = state.metrics[k]

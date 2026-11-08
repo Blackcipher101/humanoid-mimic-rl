@@ -72,7 +72,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--routine-stand-bonus", type=float, default=None, help="stand-at-end bonus fraction (default 0.1)")
     p.add_argument("--routine-gated", action="store_true",
                    help="routine reward: also multiply the dense reward after a missed milestone window by 0 (off)")
-    return p.parse_args()
+    p.add_argument("--restore-checkpoint", type=Path, default=None,
+                   help="continue from a checkpoints/<step> directory of a run with the same task, env and network "
+                        "(Brax restore: normaliser, policy and value parameters); --num-timesteps counts from 0")
+    args = p.parse_args()
+    if args.restore_checkpoint is not None:
+        args.restore_checkpoint = args.restore_checkpoint.resolve()  # orbax needs an absolute path
+        if not args.restore_checkpoint.is_dir():
+            p.error(f"--restore-checkpoint {args.restore_checkpoint} is not a checkpoint directory")
+    return args
 
 
 def _versions() -> dict[str, str]:
@@ -161,6 +169,7 @@ def main() -> None:
         "profile": args.profile,
         "impl": args.impl,
         "seed": args.seed,
+        "restore_checkpoint": str(args.restore_checkpoint) if args.restore_checkpoint else None,
         "episode_length": episode_length,
         "termination": getattr(env.unwrapped._config, "termination", None),  # pylint: disable=protected-access
         "ppo": dataclasses.asdict(ppo_cfg),
@@ -207,6 +216,7 @@ def main() -> None:
         network_factory=network_factory,
         seed=args.seed,
         save_checkpoint_path=str(ckpt_dir),
+        restore_checkpoint_path=str(args.restore_checkpoint) if args.restore_checkpoint else None,
         progress_fn=logger,
         **ppo_cfg.brax_kwargs(),
     )
