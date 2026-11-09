@@ -75,10 +75,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--flight-start-prob", type=float, default=None,
                    help="g1_backflip: probability of starting a TRAINING episode in the clip's flight (practises "
                         "landing); evaluation always starts standing (default: the env config's 0)")
+    p.add_argument("--rsi-focus", type=float, nargs=3, metavar=("START_S", "END_S", "PROB"), default=None,
+                   help="mimic tasks: draw this fraction of the random TRAINING episode starts from [START_S, END_S] "
+                        "(e.g. the landing; evaluation always starts at t = 0)")
     p.add_argument("--restore-checkpoint", type=Path, default=None,
                    help="continue from a checkpoints/<step> directory of a run with the same task, env and network "
                         "(Brax restore: normaliser, policy and value parameters); --num-timesteps counts from 0")
     args = p.parse_args()
+    if args.rsi_focus is not None and args.task not in ("mimic", "g1_mimic"):
+        p.error(f"--rsi-focus is only available for the mimic tasks, not {args.task!r}")
     if args.restore_checkpoint is not None:
         args.restore_checkpoint = args.restore_checkpoint.resolve()  # orbax needs an absolute path
         if not args.restore_checkpoint.is_dir():
@@ -160,7 +165,7 @@ def main() -> None:
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
                          routine_options=tasks.routine_options_from_args(args),
-                         flight_start_prob=args.flight_start_prob)
+                         flight_start_prob=args.flight_start_prob, rsi_focus=args.rsi_focus)
     eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
