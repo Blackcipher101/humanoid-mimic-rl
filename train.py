@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--termination", default=None, choices=("root_pose", "height_tilt"),
                    help="mimic tasks: root_pose (default: 3D root drift / full orientation) or height_tilt "
                         "(SuperMimic App. A: root height and tilt error only)")
+    p.add_argument("--max-tilt-err", type=float, default=None,
+                   help="height_tilt termination: max |g_z_body - g_z_ref| in (0, 2] (default 0.8)")
+    p.add_argument("--max-root-height-err", type=float, default=None,
+                   help="height_tilt termination: max root height error in m (default 0.25)")
     p.add_argument("--routine", action=argparse.BooleanOptionalAction, default=None,
                    help="g1_mimic: routine reward: dense tracking + per-milestone bonuses (flip -> kick -> stand, "
                         "humanoid_mimic_rl.routine). Default: on iff the clip report has a 'routine' section")
@@ -82,8 +86,10 @@ def parse_args() -> argparse.Namespace:
                    help="continue from a checkpoints/<step> directory of a run with the same task, env and network "
                         "(Brax restore: normaliser, policy and value parameters); --num-timesteps counts from 0")
     args = p.parse_args()
-    if args.rsi_focus is not None and args.task not in ("mimic", "g1_mimic"):
-        p.error(f"--rsi-focus is only available for the mimic tasks, not {args.task!r}")
+    for flag, value in (("--rsi-focus", args.rsi_focus), ("--max-tilt-err", args.max_tilt_err),
+                        ("--max-root-height-err", args.max_root_height_err)):
+        if value is not None and args.task not in ("mimic", "g1_mimic"):
+            p.error(f"{flag} is only available for the mimic tasks, not {args.task!r}")
     if args.restore_checkpoint is not None:
         args.restore_checkpoint = args.restore_checkpoint.resolve()  # orbax needs an absolute path
         if not args.restore_checkpoint.is_dir():
@@ -165,11 +171,13 @@ def main() -> None:
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
                          routine_options=tasks.routine_options_from_args(args),
+                         max_tilt_err=args.max_tilt_err, max_root_height_err_m=args.max_root_height_err,
                          flight_start_prob=args.flight_start_prob, rsi_focus=args.rsi_focus)
     eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
                          routine_options=tasks.routine_options_from_args(args),
+                         max_tilt_err=args.max_tilt_err, max_root_height_err_m=args.max_root_height_err,
                          eval_mode=args.task in ("mimic", "g1_mimic"))  # walk eval is unchanged; no flight starts
     episode_length = tasks.episode_length(env)
 
