@@ -113,6 +113,7 @@ def make_env(
     max_tilt_err: float | None = None,
     rsi_focus: tuple[float, float, float] | None = None,
     max_root_height_err_m: float | None = None,
+    flight_start_prob: float | None = None,
 ) -> mjx_env.MjxEnv:
     """Build the environment for ``task``.
 
@@ -137,6 +138,8 @@ def make_env(
       max_tilt_err: mimic tasks only: ``height_tilt`` tilt threshold (default: the env config's 0.8).
       rsi_focus: mimic tasks only: ``(start_s, end_s, prob)`` focused reference state initialisation.
       max_root_height_err_m: mimic tasks only: ``height_tilt`` height threshold (default: the env config's 0.25 m).
+      flight_start_prob: ``g1_backflip`` only: probability of starting an episode in the clip's flight
+        (``G1Backflip.reset``); ignored with ``eval_mode`` (evaluation always starts standing).
       eval_mode: for ``walk``, disables the random pushes so velocity tracking
         is measured undisturbed. For ``mimic`` / ``g1_mimic``, every episode
         starts at clip time 0 (``rsi_start_prob=1``) so the whole clip is scored.
@@ -161,6 +164,8 @@ def make_env(
     if (max_tilt_err is not None or rsi_focus is not None or max_root_height_err_m is not None) and task not in (
             "mimic", "g1_mimic"):
         raise ValueError(f"max_tilt_err / rsi_focus / max_root_height_err_m are only available for the mimic tasks, not {task!r}")
+    if flight_start_prob is not None and task != "g1_backflip":
+        raise ValueError(f"flight_start_prob is only available for g1_backflip, not {task!r}")
     if routine and task != "g1_mimic":
         raise ValueError(f"the routine reward is only available for g1_mimic, not {task!r}")
     if task == "mimic":
@@ -177,6 +182,8 @@ def make_env(
         path = (reference_path or G1_REFERENCE_PATH).resolve()
         scale = g1_model.resolve_torque_scale(path, torque_scale, allow_infeasible_clip)
         if task == "g1_backflip":
+            if flight_start_prob is not None and not eval_mode:
+                overrides["flight_start_prob"] = float(flight_start_prob)
             return g1_flip.G1Backflip(g1_flip.backflip_config(str(path), scale), overrides)
         cfg = g1_flip.mimic_config(scale)
         clip = reference.load_clip(path)

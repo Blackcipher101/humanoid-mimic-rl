@@ -72,6 +72,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--routine-stand-bonus", type=float, default=None, help="stand-at-end bonus fraction (default 0.1)")
     p.add_argument("--routine-gated", action="store_true",
                    help="routine reward: also multiply the dense reward after a missed milestone window by 0 (off)")
+    p.add_argument("--flight-start-prob", type=float, default=None,
+                   help="g1_backflip: probability of starting a TRAINING episode in the clip's flight (practises "
+                        "landing); evaluation always starts standing (default: the env config's 0)")
     p.add_argument("--restore-checkpoint", type=Path, default=None,
                    help="continue from a checkpoints/<step> directory of a run with the same task, env and network "
                         "(Brax restore: normaliser, policy and value parameters); --num-timesteps counts from 0")
@@ -156,12 +159,13 @@ def main() -> None:
     env = tasks.make_env(args.task, args.impl, ppo_cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
-                         routine_options=tasks.routine_options_from_args(args))
+                         routine_options=tasks.routine_options_from_args(args),
+                         flight_start_prob=args.flight_start_prob)
     eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
                          allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
                          routine_options=tasks.routine_options_from_args(args),
-                         eval_mode=args.task in ("mimic", "g1_mimic"))  # walk eval is unchanged
+                         eval_mode=args.task in ("mimic", "g1_mimic"))  # walk eval is unchanged; no flight starts
     episode_length = tasks.episode_length(env)
 
     run_config = {
@@ -170,6 +174,7 @@ def main() -> None:
         "impl": args.impl,
         "seed": args.seed,
         "restore_checkpoint": str(args.restore_checkpoint) if args.restore_checkpoint else None,
+        "flight_start_prob": args.flight_start_prob,
         "episode_length": episode_length,
         "termination": getattr(env.unwrapped._config, "termination", None),  # pylint: disable=protected-access
         "ppo": dataclasses.asdict(ppo_cfg),
