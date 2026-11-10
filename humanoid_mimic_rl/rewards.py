@@ -275,3 +275,20 @@ def height_tilt_failed(
     ref_up_z = quat.quat_rotate(quat.quat_conj(ref_root_quat, xp), z_axis, xp)[..., 2]
     height_err = xp.abs(root_pos_m[..., 2] - ref_root_pos_m[..., 2])
     return (height_err > max_height_err_m) | (xp.abs(up_z - ref_up_z) > max_tilt_err)
+
+
+# ---------------------------------------------------------------------------
+# Action mapping.
+# ---------------------------------------------------------------------------
+
+
+def home_range_targets(action: Array, home: Array, lower: Array, upper: Array, xp: ModuleType) -> Array:
+    """Joint targets from normalised actions in [-1, 1]: 0 = home pose, +1 = upper
+    joint limit, -1 = lower joint limit (piecewise linear per joint).
+
+    Zero action holds the home pose (a restoring prior, unlike offsets from the
+    current angles, where zero action means no restoring force at all), while
+    the full joint range stays reachable for getting up from the floor.
+    """
+    a = xp.clip(action, -1.0, 1.0)
+    return home + xp.where(a >= 0.0, a * (upper - home), a * (home - lower))
