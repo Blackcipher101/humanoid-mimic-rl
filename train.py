@@ -63,7 +63,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--termination", default=None, choices=("root_pose", "height_tilt"),
                    help="mimic tasks: root_pose (default: 3D root drift / full orientation) or height_tilt "
                         "(SuperMimic App. A: root height and tilt error only)")
-    return p.parse_args()
+    p.add_argument("--max-tilt-err", type=float, default=None,
+                   help="height_tilt termination: max |g_z_body - g_z_ref| in (0, 2] (default 0.8)")
+    p.add_argument("--max-root-height-err", type=float, default=None,
+                   help="height_tilt termination: max root height error in m (default 0.25)")
+    p.add_argument("--routine", action=argparse.BooleanOptionalAction, default=None,
+                   help="g1_mimic: routine reward: dense tracking + per-milestone bonuses (flip -> kick -> stand, "
+                        "humanoid_mimic_rl.routine). Default: on iff the clip report has a 'routine' section")
+    p.add_argument("--routine-flip-bonus", type=float, default=None,
+                   help="routine reward: flip bonus as a fraction of a perfect-tracking episode return (default 0.1)")
+    p.add_argument("--routine-kick-bonus", type=float, default=None, help="kick bonus fraction (default 0.1)")
+    p.add_argument("--routine-stand-bonus", type=float, default=None, help="stand-at-end bonus fraction (default 0.1)")
+    p.add_argument("--routine-gated", action="store_true",
+                   help="routine reward: also multiply the dense reward after a missed milestone window by 0 (off)")
+    p.add_argument("--flight-start-prob", type=float, default=None,
+                   help="g1_backflip: probability of starting a TRAINING episode in the clip's flight (practises "
+                        "landing); evaluation always starts standing (default: the env config's 0)")
+    p.add_argument("--rsi-focus", type=float, nargs=3, metavar=("START_S", "END_S", "PROB"), default=None,
+                   help="mimic tasks: draw this fraction of the random TRAINING episode starts from [START_S, END_S] "
+                        "(e.g. the landing; evaluation always starts at t = 0)")
+    p.add_argument("--restore-checkpoint", type=Path, default=None,
+                   help="continue from a checkpoints/<step> directory of a run with the same task, env and network "
+                        "(Brax restore: normaliser, policy and value parameters); --num-timesteps counts from 0")
+    args = p.parse_args()
+    for flag, value in (("--rsi-focus", args.rsi_focus), ("--max-tilt-err", args.max_tilt_err),
+                        ("--max-root-height-err", args.max_root_height_err)):
+        if value is not None and args.task not in ("mimic", "g1_mimic"):
+            p.error(f"{flag} is only available for the mimic tasks, not {args.task!r}")
+    if args.restore_checkpoint is not None:
+        args.restore_checkpoint = args.restore_checkpoint.resolve()  # orbax needs an absolute path
+        if not args.restore_checkpoint.is_dir():
+            p.error(f"--restore-checkpoint {args.restore_checkpoint} is not a checkpoint directory")
+    return args
 
 
 def _versions() -> dict[str, str]:
@@ -138,11 +169,16 @@ def main() -> None:
 
     env = tasks.make_env(args.task, args.impl, ppo_cfg.num_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
-                         allow_infeasible_clip=args.allow_infeasible_clip)
+                         allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
+                         routine_options=tasks.routine_options_from_args(args),
+                         max_tilt_err=args.max_tilt_err, max_root_height_err_m=args.max_root_height_err,
+                         flight_start_prob=args.flight_start_prob, rsi_focus=args.rsi_focus)
     eval_env = tasks.make_env(args.task, args.impl, ppo_cfg.num_eval_envs, args.reference, hold_final_s=args.hold_final_s,
                          torque_scale=args.torque_scale, termination=args.termination,
-                         allow_infeasible_clip=args.allow_infeasible_clip,
-                         eval_mode=args.task in ("mimic", "g1_mimic"))  # walk eval is unchanged
+                         allow_infeasible_clip=args.allow_infeasible_clip, routine=args.routine,
+                         routine_options=tasks.routine_options_from_args(args),
+                         max_tilt_err=args.max_tilt_err, max_root_height_err_m=args.max_root_height_err,
+                         eval_mode=args.task in ("mimic", "g1_mimic"))  # walk eval is unchanged; no flight starts
     episode_length = tasks.episode_length(env)
 
     run_config = {
@@ -150,12 +186,15 @@ def main() -> None:
         "profile": args.profile,
         "impl": args.impl,
         "seed": args.seed,
+        "restore_checkpoint": str(args.restore_checkpoint) if args.restore_checkpoint else None,
+        "flight_start_prob": args.flight_start_prob,
         "episode_length": episode_length,
         "termination": getattr(env.unwrapped._config, "termination", None),  # pylint: disable=protected-access
         "ppo": dataclasses.asdict(ppo_cfg),
         "env_config": env.unwrapped._config.to_dict(),  # pylint: disable=protected-access
         "model_label": getattr(env.unwrapped, "model_label", None),
         "allow_infeasible_clip": args.allow_infeasible_clip,
+        "routine": tasks.routine_run_config(env),
         "domain_randomization": spec.domain_randomization,
         "versions": _versions(),
         "devices": [str(d) for d in jax.devices()],
@@ -195,6 +234,7 @@ def main() -> None:
         network_factory=network_factory,
         seed=args.seed,
         save_checkpoint_path=str(ckpt_dir),
+        restore_checkpoint_path=str(args.restore_checkpoint) if args.restore_checkpoint else None,
         progress_fn=logger,
         **ppo_cfg.brax_kwargs(),
     )

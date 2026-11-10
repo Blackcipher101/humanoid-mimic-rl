@@ -21,7 +21,9 @@ Adaptations to this repository (all documented in the README):
   The paper allows analytic heads; it learns a soft termination probability,
   here termination is a hard indicator with a stop-gradient (rewards are dense);
 * no domain randomisation, so the world model has no sim-context input;
-* reward = the DeepMimic reward of ``MimicTask`` (the paper uses BeyondMimic's);
+* reward = the DeepMimic reward of ``MimicTask`` (the paper uses BeyondMimic's); with the opt-in routine
+  reward (``humanoid_mimic_rl.routine``) imagination adds a differentiable surrogate of the milestone bonuses
+  (``env.routine_soft_step``), the simulator env pays the hard bonuses;
 * return-based reset sampling is replaced by the env's uniform RSI.
 """
 
@@ -38,6 +40,7 @@ import jax
 import jax.numpy as jp
 import numpy as np
 import optax
+from brax.training import types as training_types
 from brax.training.acme import running_statistics
 from flax import struct
 from mujoco import mjx
@@ -187,6 +190,9 @@ class SuperMimicTrainer:
         self._v_step = jax.vmap(env.step)
         self._v_targets = jax.vmap(env.motor_targets)
         self._v_reward = jax.vmap(env.reward_and_termination)
+        if env.routine_enabled:  # imagination-only differentiable surrogate of the milestone bonuses
+            self._v_routine_init = jax.vmap(env.routine_soft_init)
+            self._v_routine_step = jax.vmap(env.routine_soft_step)
 
     # ------------------------------------------------------------------
     # Analytic heads.
@@ -394,7 +400,7 @@ class SuperMimicTrainer:
         v_kin = jax.vmap(self.kinematics)
 
         def body(carry, k_step):
-            qpos, qvel, t, la, lla, alive = carry
+            qpos, qvel, t, la, lla, alive, rstate = carry
             obs = self.actor_obs(qpos, qvel, la, t)
             obs = obs + self.obs_noise * jax.random.uniform(k_step, obs.shape, minval=-1.0, maxval=1.0)
             action = self.policy.apply(pi_params, _norm(obs, ts.obs_stats))
@@ -403,17 +409,23 @@ class SuperMimicTrainer:
             t2 = t + dt
             ee, fall_h = v_kin(qpos2)
             reward, _, flags = self._v_reward(qpos2, qvel2, ee, fall_h, t2, action, la, lla)
+            if self.env.routine_enabled:
+                rstate, extra = self._v_routine_step(rstate, qpos2, ee, t2, flags["finished"], flags["fell"])
+                reward = reward + extra
             done = jax.lax.stop_gradient(flags["done"].astype(jp.float32))
             crit = self.critic_obs(qpos, qvel, la, t)
             out = {"reward": reward, "done": done, "alive": alive, "critic_obs": crit}
-            return (qpos2, qvel2, t2, action, la, alive * (1.0 - done)), out
+            return (qpos2, qvel2, t2, action, la, alive * (1.0 - done), rstate), out
 
         if cfg.remat_imagination:
             body = jax.checkpoint(body)
         b = start["qpos"].shape[0]
-        carry0 = (start["qpos"], start["qvel"], start["time"], start["last_act"], start["last_last_act"], jp.ones(b))
+        rstate0 = self._v_routine_init(start["qpos"], start["time"]) if self.env.routine_enabled else {}
+        carry0 = (
+            start["qpos"], start["qvel"], start["time"], start["last_act"], start["last_last_act"], jp.ones(b), rstate0
+        )
         carry, traj = jax.lax.scan(body, carry0, jax.random.split(key, cfg.horizon))
-        qpos_h, qvel_h, t_h, la_h, _, alive_h = carry
+        qpos_h, qvel_h, t_h, la_h, _, alive_h, _ = carry
         crit_h = self.critic_obs(qpos_h, qvel_h, la_h, t_h)
         return traj, crit_h, alive_h  # traj leaves are (H, B, ...)
 
@@ -466,15 +478,24 @@ class SuperMimicTrainer:
         )
         return ts.replace(v_params=v_params, v_opt=v_opt), jp.mean(losses)
 
-    def improve_policy(self, ts: TrainState) -> tuple[TrainState, dict[str, jax.Array]]:
+    def improve_policy(self, ts: TrainState, update_policy: bool = True) -> tuple[TrainState, dict[str, jax.Array]]:
+        """Policy step on imagined rollouts, then the critic fit on them.
+
+        ``update_policy=False`` (static) still fits the critic but leaves the policy and its optimiser
+        state unchanged: used after ``warm_start`` so a fresh world model and critic do not move a trained
+        policy before they are fit to it.
+        """
         cfg = self.cfg
         key, k_start, k_img, k_crit = jax.random.split(ts.key, 4)
         start = replay_states(ts.replay, k_start, cfg.policy_batch_size)
         (loss, (traj, crit_h, ret)), grads = jax.value_and_grad(self._policy_loss, has_aux=True)(
             ts.pi_params, ts, start, k_img
         )
-        updates, pi_opt = self.pi_tx.update(grads, ts.pi_opt, ts.pi_params)
-        ts = ts.replace(pi_params=optax.apply_updates(ts.pi_params, updates), pi_opt=pi_opt, key=key)
+        if update_policy:
+            updates, pi_opt = self.pi_tx.update(grads, ts.pi_opt, ts.pi_params)
+            ts = ts.replace(pi_params=optax.apply_updates(ts.pi_params, updates), pi_opt=pi_opt, key=key)
+        else:
+            ts = ts.replace(key=key)
 
         traj = jax.lax.stop_gradient(traj)
         targets = self._critic_targets(ts, traj, jax.lax.stop_gradient(crit_h))
@@ -516,6 +537,50 @@ class SuperMimicTrainer:
 
         return jax.jit(warmup), jax.jit(iteration)
 
+    def jitted_frozen_policy(self) -> Callable[[TrainState], Any]:
+        """Collect + fit WM + fit critic, policy unchanged (the phase after ``warm_start``)."""
+
+        def iteration(ts: TrainState):
+            ts, m_c = self.collect(ts)
+            ts, m_w = self.fit_world_model(ts)
+            ts, m_p = self.improve_policy(ts, update_policy=False)
+            return ts, {**m_c, **m_w, **m_p}
+
+        return jax.jit(iteration)
+
+    def warm_start(self, ts: TrainState, checkpoint: Path, stats_count: float = 1e7) -> TrainState:
+        """Load policy weights and observation statistics from a ``save_checkpoint`` file.
+
+        The checkpoint holds only the policy and the observation mean/std, so the world model and critic
+        start fresh (fit them with ``jitted_frozen_policy`` first). The statistics get a large pseudo-count
+        so the policy's input normalisation stays put while collection keeps updating it. Raises if the
+        network shapes do not match (different env, clip type or trick set).
+        """
+        payload = flax.serialization.msgpack_restore(checkpoint.read_bytes())
+        missing = {"policy", "obs_mean", "obs_std"} - set(payload)
+        if missing:
+            raise ValueError(f"{checkpoint}: not a SuperMimic checkpoint (missing {sorted(missing)})")
+        pi_params = flax.serialization.from_state_dict(ts.pi_params, payload["policy"])
+        for new, old in zip(jax.tree_util.tree_leaves(pi_params), jax.tree_util.tree_leaves(ts.pi_params)):
+            if new.shape != old.shape:
+                raise ValueError(f"{checkpoint}: policy shape {new.shape} != {old.shape} of this config")
+        mean, std = jp.asarray(payload["obs_mean"]), jp.asarray(payload["obs_std"])
+        if mean.shape != ts.obs_stats.mean.shape:
+            raise ValueError(f"{checkpoint}: obs dim {mean.shape} != {ts.obs_stats.mean.shape} of this env")
+        if not (np.all(np.isfinite(mean)) and np.all(np.isfinite(std))):
+            raise ValueError(f"{checkpoint}: non-finite observation statistics")
+        if not 0 < stats_count < 2**32:
+            raise ValueError(f"stats_count must be in (0, 2**32), got {stats_count}")
+        old = ts.obs_stats.count
+        if isinstance(old, training_types.UInt64):  # brax keeps the count as two uint32 halves
+            count = training_types.UInt64(hi=jp.zeros_like(jp.asarray(old.hi)),
+                                          lo=jp.asarray(int(stats_count), jp.asarray(old.lo).dtype))
+        else:
+            count = jp.asarray(stats_count, jp.asarray(old).dtype)
+        obs_stats = ts.obs_stats.replace(mean=mean, std=std, count=count,
+                                         summed_variance=jp.square(std) * jp.float32(stats_count))
+        return ts.replace(pi_params=pi_params, obs_stats=obs_stats)
+
     # ------------------------------------------------------------------
     # Evaluation and checkpoints.
     # ------------------------------------------------------------------
@@ -538,6 +603,7 @@ class SuperMimicTrainer:
                     "qpos": s.data.qpos,
                     "fell": s.metrics["fell"],
                     "tracking_failed": s.metrics["tracking_failed"],
+                    **{k: s.metrics[k] for k in metrics.ROUTINE_FLAGS if k in s.metrics},
                     "time": s.data.time,
                     "up_z": jax.vmap(eval_env.up_z)(s.data),
                     "feet_contact": jax.vmap(eval_env.feet_contact)(s.data),
@@ -565,7 +631,8 @@ def summarize_eval(
     traj: dict[str, jax.Array], ctrl_dt_s: float, home_height_m: float, clip: reference.ReferenceClip
 ) -> dict[str, float]:
     """Eval metrics from a ``(T, N, ...)`` rollout: tracking metrics for every clip
-    (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip."""
+    (``metrics.summarize_tracking``), plus flip metrics when the clip is a flip and routine rates when the
+    env records the routine milestone flags."""
     tr = {k: np.moveaxis(np.asarray(v), 0, 1) for k, v in traj.items()}
     ref = reference.sample_qpos_batch(clip, tr["time"])
     out = metrics.summarize_tracking(
@@ -579,6 +646,8 @@ def summarize_eval(
         # The flip "fall_rate" (not upright at the end, or terminated) is a different quantity.
         flip["flip_fall_rate"] = flip.pop("fall_rate")
         out.update(flip)
+    if all(k in tr for k in metrics.ROUTINE_FLAGS):
+        out.update(metrics.summarize_routine(tr["done"], *(tr[k] for k in metrics.ROUTINE_FLAGS)))
     return out
 
 

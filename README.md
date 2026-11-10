@@ -9,6 +9,11 @@ Unitree G1, including a CMU-mocap spin kick on the G1 at its published peak torq
 | [![Unitree G1 doing an airborne spin kick with the trained SuperMimic policy](docs/media/g1_spinkick.gif)](docs/media/g1_spinkick.mp4) |
 | [mp4](docs/media/g1_spinkick.mp4) |
 
+| Backflip (Unitree G1, PPO tracking of a retargeted clip): simulation, **5x published peak torque - a modified model, not the real robot's limits** |
+|---|
+| [landed episode (mp4)](docs/media/g1_backflip_landed_a.mp4) · [slow motion](docs/media/g1_backflip_landed_a_slow.mp4) · [a typical failure](docs/media/g1_backflip_typical_fail.mp4) |
+| Selected episodes: the final policies land in about 5-11 % of 128 episodes and complete the rotation in 75-85 %. Details: [docs/media/g1_backflip_results.md](docs/media/g1_backflip_results.md) |
+
 | Get-up (v5): from lying on its back (left) and after slipping into the splits (right) |
 |---|
 | [![Booster T1 getting up from the floor with the trained PPO policy](docs/media/getup_full.gif)](docs/media/getup_full.mp4) |

@@ -14,6 +14,7 @@ import numpy as np
 from humanoid_mimic_rl import quat
 
 TWO_PI = 2.0 * np.pi
+ROUTINE_FLAGS = ("flip_done", "kick_done", "routine_done")  # per-step edge-indicator env metrics
 
 
 def alive_mask(done: np.ndarray) -> np.ndarray:
@@ -259,3 +260,22 @@ def summarize_tracking(
         joint_rmse_rad=float(np.nanmean(_masked_mean(joint_rmse, mask))),
     )
     return out
+
+
+def summarize_routine(
+    done: np.ndarray, flip_done: np.ndarray, kick_done: np.ndarray, routine_done: np.ndarray
+) -> dict[str, float]:
+    """Multi-stage routine rates (``humanoid_mimic_rl.routine``) from per-step ``(N, T)`` env metrics.
+
+    The three flags are the env's edge indicators (1 on the step a milestone is first completed / on the
+    step the terminal bonus is paid), so an episode counts when its flag is 1 at any alive step:
+    ``flip_rate`` / ``kick_rate`` = fraction of episodes that completed that milestone (even if they fell
+    afterwards); ``routine_success_rate`` = fraction that paid the bonus, i.e. completed flip AND kick AND
+    stood at the final step of a normal finish (no fall, tracking failure or invalid state).
+    """
+    mask = alive_mask(done)
+
+    def rate(flag: np.ndarray) -> float:
+        return float(np.mean(np.any(flag.astype(bool) & mask, axis=1)))
+
+    return {"flip_rate": rate(flip_done), "kick_rate": rate(kick_done), "routine_success_rate": rate(routine_done)}

@@ -121,6 +121,16 @@ def human_keypoints(skeleton: cmu_mocap.Skeleton, motion: cmu_mocap.Motion, fps_
         "headtop": z(pose.tip["head"]), "spine_low": z(pose.origin["upperback"]),
         "neck_base": z(pose.origin["lowerneck"]),
     }  # fmt: skip
+    return keypoints_to_motion(p, fps_hz)
+
+
+def keypoints_to_motion(p: dict[str, np.ndarray], fps_hz: float) -> HumanMotion:
+    """``HumanMotion`` from raw key points (m, z-up, every name in ``KEYPOINT_NAMES`` except ``hipmid``):
+    low-pass, frame 0 moved to the origin facing +x, pelvis / torso frames, leg length."""
+    missing = set(KEYPOINT_NAMES) - {"hipmid"} - set(p)
+    if missing:
+        raise ValueError(f"missing key points: {sorted(missing)}")
+    p = dict(p)
     p["hipmid"] = 0.5 * (p["lhip"] + p["rhip"])
     p = {k: lowpass(v, fps_hz, HUMAN_LOWPASS_HZ) for k, v in p.items()}
     pelvis = _frame_from_axes(p["lhip"] - p["rhip"], p["spine_low"] - p["hipmid"])
@@ -471,7 +481,16 @@ def retarget(
     final_lowpass_hz: float | None = None,
 ) -> RetargetResult:
     """Retarget one CMU motion; see the module docstring."""
-    native = human_keypoints(skeleton, motion, amc_fps_hz)
+    return retarget_human(rig, human_keypoints(skeleton, motion, amc_fps_hz), log, final_lowpass_hz)
+
+
+def retarget_human(
+    rig: G1Rig,
+    native: HumanMotion,
+    log=None,  # noqa: ANN001
+    final_lowpass_hz: float | None = None,
+) -> RetargetResult:
+    """Retarget human key points at their native rate (``keypoints_to_motion``); see the module docstring."""
     contacts_native = detect_contacts(native)
     scale = rig.leg_length_m / native.leg_length_m
     h = froude_resample(native, scale)
